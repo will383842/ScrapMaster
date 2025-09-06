@@ -347,7 +347,7 @@ class ScrapingEngine:
         email = str(email).strip().lower()
         
         # Validation basique d'email
-        if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}, email):
+        if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', email):
             return email[:200]
         
         return ''

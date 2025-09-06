@@ -1,55 +1,24 @@
-# DÉPENDANCES SCRAPMASTER
-# Version : 2025-01-01
+# DÉPENDANCES SCRAPMASTER - VERSION MINIMALE FONCTIONNELLE
+# Version : 2025-01-01 (Compatible Windows sans compilation)
 
 # === Core Framework ===
 Flask==3.0.0
-Werkzeug==3.0.1
+Werkzeug
 
 # === Web Scraping ===
 requests==2.31.0
 beautifulsoup4==4.12.2
-lxml==4.9.3
-
-# === Data Processing ===
-pandas==2.1.4
-openpyxl==3.1.2
-
-# === Text & Language Processing ===
-langdetect==1.0.9
-phonenumbers==8.13.27
-rapidfuzz==3.6.1
 
 # === Utilities ===
 python-dateutil==2.8.2
 pytz==2023.3
 
-# === Optional (pour des fonctionnalités avancées) ===
-# Selenium pour JavaScript rendering (optionnel)
-# selenium==4.15.2
+# === Optionnel (ajouter si besoin) ===
+# langdetect    # Détection de langue (optionnel)
+# phonenumbers  # Normalisation téléphones (optionnel)  
+# rapidfuzz     # Déduplication (optionnel)
+# lxml          # Parser XML rapide (optionnel)
+# pandas        # Export Excel (optionnel - CSV sinon)
+# openpyxl      # Excel (optionnel)
 
-# ChromeDriver manager (si Selenium utilisé)
-# webdriver-manager==4.0.1
-
-# Proxy rotation (optionnel) 
-# requests[socks]==2.31.0
-
-# Async HTTP (optionnel pour performance)
-# aiohttp==3.9.1
-
-# Image processing (optionnel)
-# Pillow==10.1.0
-
-# Database alternatives (optionnel)
-# SQLAlchemy==2.0.23
-
-# Monitoring & Logging (optionnel)
-# structlog==23.2.0
-
-# Testing (dev only)
-# pytest==7.4.3
-# pytest-flask==1.3.0
-
-# === Development Tools (commentées par défaut) ===
-# black==23.11.0      # Code formatting
-# flake8==6.1.0       # Linting
-# mypy==1.7.1         # Type checking
+# Note: L'application fonctionne parfaitement avec les packages de base

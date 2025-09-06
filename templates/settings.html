@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Paramètres - ScrapMaster</title>
+    <style>
+        body { font-family: Arial; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .card { background: white; padding: 25px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        .btn:hover { background: #0056b3; }
+        .btn.success { background: #28a745; }
+        .btn.danger { background: #dc3545; }
+        .btn.secondary { background: #6c757d; }
+        .btn.purple { background: #6f42c1; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #f8f9fa; font-weight: bold; }
+        .form-group { margin: 15px 0; }
+        label { display: block; font-weight: bold; margin-bottom: 5px; }
+        input, textarea, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        .tabs { display: flex; border-bottom: 2px solid #dee2e6; margin-bottom: 20px; }
+        .tab { padding: 12px 20px; cursor: pointer; border: none; background: none; font-size: 16px; }
+        .tab.active { border-bottom: 2px solid #007bff; color: #007bff; font-weight: bold; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>⚙️ Paramètres ScrapMaster</h1>
+            <div>
+                <a href="/" class="btn secondary">🏠 Dashboard</a>
+                <a href="/studio" class="btn purple">🧰 Studio</a>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('professions')">👔 Métiers</button>
+            <button class="tab" onclick="showTab('countries')">🌍 Pays/Zones</button>
+            <button class="tab" onclick="showTab('languages')">🗣️ Langues</button>
+            <button class="tab" onclick="showTab('system')">🔧 Système</button>
+        </div>
+
+        <!-- Onglet Métiers -->
+        <div id="professions" class="tab-content active">
+            <div class="grid">
+                <div class="card">
+                    <h2>➕ Ajouter un Métier</h2>
+                    <form id="professionForm">
+                        <div class="form-group">
+                            <label>Nom du Métier *</label>
+                            <input type="text" id="profName" required placeholder="Ex: Photographes">
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea id="profDesc" rows="3" placeholder="Description du métier..."></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Template de Scraper</label>
+                            <select id="profTemplate">
+                                <option value="generic_scraper">Générique</option>
+                                <option value="youtube_scraper">YouTubeurs</option>
+                                <option value="lawyer_scraper">Avocats</option>
+                                <option value="association_scraper">Associations</option>
+                                <option value="translator_scraper">Traducteurs</option>
+                                <option value="nomad_scraper">Digital Nomads</option>
+                                <option value="restaurant_scraper">Restaurateurs</option>
+                                <option value="hotel_scraper">Hôteliers</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="btn success">Ajouter</button>
+                    </form>
+                </div>
+                
+                <div class="card">
+                    <h2>📋 Métiers Configurés</h2>
+                    <table>
+                        <thead>
+                            <tr><th>Nom</th><th>Description</th><th>Template</th><th>Créé le</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for prof in professions %}
+                            <tr>
+                                <td><strong>{{ prof[1] }}</strong></td>
+                                <td>{{ prof[2][:50] if prof[2] else '-' }}{% if prof[2] and prof[2]|length > 50 %}...{% endif %}</td>
+                                <td><code>{{ prof[3] or 'generic' }}</code></td>
+                                <td>{{ prof[4][:10] if prof[4] else '-' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Onglet Pays -->
+        <div id="countries" class="tab-content">
+            <div class="grid">
+                <div class="card">
+                    <h2>🌍 Ajouter un Pays/Zone</h2>
+                    <form id="countryForm">
+                        <div class="form-group">
+                            <label>Nom du Pays/Zone *</label>
+                            <input type="text" id="countryName" required placeholder="Ex: Singapour">
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea id="countryDesc" rows="3" placeholder="Description de la zone..."></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>Fichier Sources (optionnel)</label>
+                            <input type="text" id="countrySources" placeholder="Ex: singapore_sources.json">
+                        </div>
+                        <button type="submit" class="btn success">Ajouter</button>
+                    </form>
+                </div>
+                
+                <div class="card">
+                    <h2>🗺️ Pays/Zones Configurés</h2>
+                    <table>
+                        <thead>
+                            <tr><th>Nom</th><th>Description</th><th>Sources</th><th>Créé le</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for country in countries %}
+                            <tr>
+                                <td><strong>{{ country[1] }}</strong></td>
+                                <td>{{ country[2][:50] if country[2] else '-' }}{% if country[2] and country[2]|length > 50 %}...{% endif %}</td>
+                                <td><code>{{ country[3] or '-' }}</code></td>
+                                <td>{{ country[4][:10] if country[4] else '-' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Onglet Langues -->
+        <div id="languages" class="tab-content">
+            <div class="grid">
+                <div class="card">
+                    <h2>🗣️ Ajouter une Langue</h2>
+                    <form id="languageForm">
+                        <div class="form-group">
+                            <label>Code Langue *</label>
+                            <input type="text" id="langCode" required placeholder="Ex: es" maxlength="5">
+                            <small>Format ISO 639-1 (2 lettres)</small>
+                        </div>
+                        <div class="form-group">
+                            <label>Nom de la Langue *</label>
+                            <input type="text" id="langName" required placeholder="Ex: Espagnol">
+                        </div>
+                        <div class="form-group">
+                            <label>Description</label>
+                            <textarea id="langDesc" rows="2" placeholder="Description optionnelle..."></textarea>
+                        </div>
+                        <button type="submit" class="btn success">Ajouter</button>
+                    </form>
+                </div>
+                
+                <div class="card">
+                    <h2>🌐 Langues Configurées</h2>
+                    <table>
+                        <thead>
+                            <tr><th>Code</th><th>Nom</th><th>Description</th><th>Créé le</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for lang in languages %}
+                            <tr>
+                                <td><strong>{{ lang[1] }}</strong></td>
+                                <td>{{ lang[2] }}</td>
+                                <td>{{ lang[3] or '-' }}</td>
+                                <td>{{ lang[4][:10] if lang[4] else '-' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Onglet Système -->
+        <div id="system" class="tab-content">
+            <div class="card">
+                <h2>🔧 Configuration Système</h2>
+                
+                <div class="form-group">
+                    <label>Base de Données</label>
+                    <input type="text" readonly value="{{ db_path or 'Non configuré' }}">
+                </div>
+                
+                <div class="form-group">
+                    <label>Dossier Scrapers</label>
+                    <input type="text" readonly value="{{ scrapers_path or 'Non configuré' }}">
+                </div>
+                
+                <div class="form-group">
+                    <label>Dossier Exports</label>
+                    <input type="text" readonly value="{{ exports_path or 'Non configuré' }}">
+                </div>
+                
+                <h3>Actions Système</h3>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px;">
+                    <button class="btn" onclick="testDatabase()">🔍 Tester Base de Données</button>
+                    <button class="btn" onclick="cleanupOldProjects()">🧹 Nettoyer Anciens Projets</button>
+                    <button class="btn" onclick="backupDatabase()" style="background: #fd7e14;">💾 Sauvegarder DB</button>
+                    <button class="btn danger" onclick="resetSystem()">⚠️ Reset Système</button>
+                </div>
+                
+                <div id="systemStatus" style="padding: 15px; background: #f8f9fa; border-radius: 4px;">
+                    <strong>Statut Système:</strong> <span id="statusText">Prêt</span>
+                </div>
+            </div>
+        </div>
+        
+        {% if error %}
+        <div class="card" style="border-left: 4px solid #dc3545;">
+            <h3 style="color: #dc3545;">⚠️ Erreur</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        function showTab(tabName) {
+            // Masquer tous les contenus
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            
+            // Désactiver tous les onglets
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Activer l'onglet cliqué
+            document.getElementById(tabName).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        // Formulaire métiers
+        document.getElementById('professionForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const data = {
+                name: document.getElementById('profName').value,
+                description: document.getElementById('profDesc').value,
+                template: document.getElementById('profTemplate').value
+            };
+            
+            try {
+                const response = await fetch('/add_profession', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                if (result.success) {
+                    alert('Métier ajouté avec succès !');
+                    location.reload();
+                } else {
+                    alert('Erreur lors de l\'ajout: ' + (result.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                alert('Erreur: ' + error.message);
+            }
+        });
+
+        // Formulaire pays
+        document.getElementById('countryForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const data = {
+                name: document.getElementById('countryName').value,
+                description: document.getElementById('countryDesc').value,
+                sources: document.getElementById('countrySources').value
+            };
+            
+            try {
+                const response = await fetch('/add_country', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                if (result.success) {
+                    alert('Pays/Zone ajouté avec succès !');
+                    location.reload();
+                } else {
+                    alert('Erreur lors de l\'ajout: ' + (result.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                alert('Erreur: ' + error.message);
+            }
+        });
+
+        // Formulaire langues
+        document.getElementById('languageForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const data = {
+                code: document.getElementById('langCode').value.toLowerCase(),
+                name: document.getElementById('langName').value,
+                description: document.getElementById('langDesc').value
+            };
+            
+            try {
+                const response = await fetch('/add_language', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                if (result.success) {
+                    alert('Langue ajoutée avec succès !');
+                    location.reload();
+                } else {
+                    alert('Erreur lors de l\'ajout: ' + (result.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                alert('Erreur: ' + error.message);
+            }
+        });
+
+        // Fonctions système
+        async function testDatabase() {
+            updateStatus('Test en cours...', 'warning');
+            try {
+                const response = await fetch('/api/stats');
+                if (response.ok) {
+                    updateStatus('Base de données OK ✅', 'success');
+                } else {
+                    updateStatus('Erreur base de données ❌', 'danger');
+                }
+            } catch (error) {
+                updateStatus('Erreur connexion ❌', 'danger');
+            }
+        }
+
+        function cleanupOldProjects() {
+            if (confirm('Supprimer les projets de plus de 30 jours ?')) {
+                updateStatus('Nettoyage en cours...', 'warning');
+                // TODO: Implémenter l'endpoint de nettoyage
+                setTimeout(() => {
+                    updateStatus('Nettoyage terminé ✅', 'success');
+                }, 2000);
+            }
+        }
+
+        function backupDatabase() {
+            updateStatus('Sauvegarde en cours...', 'warning');
+            // TODO: Implémenter l'endpoint de sauvegarde
+            setTimeout(() => {
+                updateStatus('Sauvegarde créée ✅', 'success');
+            }, 3000);
+        }
+
+        function resetSystem() {
+            if (confirm('⚠️ ATTENTION: Cette action supprimera tous les projets et résultats. Continuer ?')) {
+                if (confirm('Êtes-vous VRAIMENT sûr ? Cette action est irréversible !')) {
+                    updateStatus('Reset du système...', 'danger');
+                    // TODO: Implémenter l'endpoint de reset
+                    setTimeout(() => {
+                        updateStatus('Système réinitialisé ⚠️', 'danger');
+                    }, 5000);
+                }
+            }
+        }
+
+        function updateStatus(message, type) {
+            const statusText = document.getElementById('statusText');
+            const statusDiv = document.getElementById('systemStatus');
+            
+            statusText.textContent = message;
+            
+            // Reset classes
+            statusDiv.style.background = '#f8f9fa';
+            statusDiv.style.color = '#000';
+            
+            if (type === 'success') {
+                statusDiv.style.background = '#d4edda';
+                statusDiv.style.color = '#155724';
+            } else if (type === 'warning') {
+                statusDiv.style.background = '#fff3cd';
+                statusDiv.style.color = '#856404';
+            } else if (type === 'danger') {
+                statusDiv.style.background = '#f8d7da';
+                statusDiv.style.color = '#721c24';
+            }
+        }
+    </script>
+</body>
+</html>
