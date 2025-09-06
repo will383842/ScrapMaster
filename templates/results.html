@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Résultats - {% if project %}{{ project[0] }}{% endif %} - ScrapMaster</title>
+    <style>
+        body { font-family: Arial; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .card { background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+        .btn:hover { background: #0056b3; }
+        .btn.success { background: #28a745; }
+        .btn.secondary { background: #6c757d; }
+        .btn.purple { background: #6f42c1; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #f8f9fa; font-weight: bold; position: sticky; top: 0; }
+        .result-table { max-height: 600px; overflow: auto; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 20px; }
+        .stat-box { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }
+        .stat-number { font-size: 2em; font-weight: bold; display: block; }
+        .filters { display: flex; gap: 15px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+        .filter-input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        .empty-state { text-align: center; padding: 40px; }
+        .project-info { background: #f8f9fa; padding: 15px; border-radius: 4px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {% if project %}
+        <h1>📊 Résultats: {{ project[0] }}</h1>
+        
+        <div class="card">
+            <h2>Informations du Projet</h2>
+            <div class="project-info">
+                <p><strong>Métier:</strong> {{ project[1] }} | <strong>Pays:</strong> {{ project[2] }} | <strong>Langue:</strong> {{ project[3] }} | <strong>Total Résultats:</strong> {{ project[4] }}</p>
+            </div>
+            
+            <div>
+                <a href="/projects" class="btn secondary">← Retour aux Projets</a>
+                <a href="/export/{{ project[0] if project else '0' }}" class="btn success">📥 Exporter Excel</a>
+                <a href="/studio" class="btn purple">🧰 Studio</a>
+            </div>
+        </div>
+
+        {% if results %}
+        <div class="stats">
+            <div class="stat-box">
+                <span class="stat-number">{{ results|length }}</span>
+                <span>Résultats Total</span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-number">{{ results|selectattr("4")|list|length }}</span>
+                <span>Avec Email</span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-number">{{ results|selectattr("3")|list|length }}</span>
+                <span>Avec Site Web</span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-number">{{ results|selectattr("5")|list|length }}</span>
+                <span>Avec Téléphone</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Filtrer les Résultats</h2>
+            <div class="filters">
+                <input type="text" id="filterName" class="filter-input" placeholder="Filtrer par nom...">
+                <input type="text" id="filterCategory" class="filter-input" placeholder="Filtrer par catégorie...">
+                <input type="text" id="filterCity" class="filter-input" placeholder="Filtrer par ville...">
+                <select id="filterContact" class="filter-input">
+                    <option value="">Tous</option>
+                    <option value="email">Avec Email</option>
+                    <option value="website">Avec Site Web</option>
+                    <option value="phone">Avec Téléphone</option>
+                </select>
+                <button onclick="clearFilters()" class="btn secondary">Effacer Filtres</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 id="resultsTitle">Liste des Résultats ({{ results|length }} entrées)</h2>
+            <div class="result-table">
+                <table id="resultsTable">
+                    <thead>
+                        <tr>
+                            <th>Nom</th>
+                            <th>Catégorie</th>
+                            <th>Description</th>
+                            <th>Site Web</th>
+                            <th>Email</th>
+                            <th>Téléphone</th>
+                            <th>Ville</th>
+                            <th>Source</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for result in results %}
+                        <tr class="result-row">
+                            <td><strong>{{ result[0] or '-' }}</strong></td>
+                            <td>{{ result[1] or '-' }}</td>
+                            <td title="{{ result[2] or '' }}">{{ (result[2] or '')[:100] }}{% if result[2] and result[2]|length > 100 %}...{% endif %}</td>
+                            <td>
+                                {% if result[3] %}
+                                <a href="{{ result[3] }}" target="_blank">🔗 Site</a>
+                                {% else %}-{% endif %}
+                            </td>
+                            <td>{{ result[4] or '-' }}</td>
+                            <td>{{ result[5] or '-' }}</td>
+                            <td>{{ result[6] or '-' }}</td>
+                            <td>
+                                {% if result[7] %}
+                                <a href="{{ result[7] }}" target="_blank" title="{{ result[7] }}">📄 Source</a>
+                                {% else %}-{% endif %}
+                            </td>
+                            <td>{{ result[8][:10] if result[8] else '-' }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <div class="card empty-state">
+            <h2>Aucun résultat trouvé</h2>
+            <p>Ce projet n'a pas encore de résultats ou le scraping a échoué.</p>
+            <a href="/projects" class="btn secondary">← Retour aux Projets</a>
+        </div>
+        {% endif %}
+        
+        {% else %}
+        <div class="card empty-state">
+            <h2>⚠️ Projet introuvable</h2>
+            <p>Le projet demandé n'existe pas ou a été supprimé.</p>
+            <a href="/projects" class="btn secondary">← Retour aux Projets</a>
+        </div>
+        {% endif %}
+        
+        {% if error %}
+        <div class="card" style="border-left: 4px solid #dc3545;">
+            <h3 style="color: #dc3545;">⚠️ Erreur</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        // Filtrage en temps réel
+        function setupFilters() {
+            const filters = {
+                name: document.getElementById('filterName'),
+                category: document.getElementById('filterCategory'), 
+                city: document.getElementById('filterCity'),
+                contact: document.getElementById('filterContact')
+            };
+
+            Object.values(filters).forEach(filter => {
+                if (filter) {
+                    filter.addEventListener('input', applyFilters);
+                    filter.addEventListener('change', applyFilters);
+                }
+            });
+        }
+
+        function applyFilters() {
+            const nameFilter = document.getElementById('filterName')?.value.toLowerCase() || '';
+            const categoryFilter = document.getElementById('filterCategory')?.value.toLowerCase() || '';
+            const cityFilter = document.getElementById('filterCity')?.value.toLowerCase() || '';
+            const contactFilter = document.getElementById('filterContact')?.value || '';
+
+            const rows = document.querySelectorAll('.result-row');
+            let visibleCount = 0;
+
+            rows.forEach(row => {
+                const cells = row.cells;
+                if (cells.length < 9) return;
+                
+                const name = cells[0].textContent.toLowerCase();
+                const category = cells[1].textContent.toLowerCase();
+                const website = cells[3].textContent.trim();
+                const email = cells[4].textContent.trim();
+                const phone = cells[5].textContent.trim();
+                const city = cells[6].textContent.toLowerCase();
+
+                let show = true;
+
+                // Filtre nom
+                if (nameFilter && !name.includes(nameFilter)) {
+                    show = false;
+                }
+
+                // Filtre catégorie
+                if (categoryFilter && !category.includes(categoryFilter)) {
+                    show = false;
+                }
+
+                // Filtre ville
+                if (cityFilter && !city.includes(cityFilter)) {
+                    show = false;
+                }
+
+                // Filtre contact
+                if (contactFilter) {
+                    switch(contactFilter) {
+                        case 'email':
+                            if (!email || email === '-') show = false;
+                            break;
+                        case 'website':
+                            if (!website || website === '-') show = false;
+                            break;
+                        case 'phone':
+                            if (!phone || phone === '-') show = false;
+                            break;
+                    }
+                }
+
+                row.style.display = show ? '' : 'none';
+                if (show) visibleCount++;
+            });
+
+            // Mise à jour du compteur
+            const title = document.getElementById('resultsTitle');
+            if (title) {
+                const totalCount = document.querySelectorAll('.result-row').length;
+                title.textContent = `Liste des Résultats (${visibleCount} entrées visibles sur ${totalCount})`;
+            }
+        }
+
+        function clearFilters() {
+            const inputs = ['filterName', 'filterCategory', 'filterCity', 'filterContact'];
+            inputs.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) element.value = '';
+            });
+            applyFilters();
+        }
+
+        // Initialisation
+        document.addEventListener('DOMContentLoaded', setupFilters);
+    </script>
+</body>
+</html>

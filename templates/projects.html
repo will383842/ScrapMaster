@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Projets - ScrapMaster</title>
+    <style>
+        body { font-family: Arial; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .card { background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; }
+        .btn:hover { background: #0056b3; }
+        .btn.success { background: #28a745; }
+        .btn.danger { background: #dc3545; }
+        .btn.warning { background: #ffc107; color: #000; }
+        .btn.secondary { background: #6c757d; }
+        .btn.purple { background: #6f42c1; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #f8f9fa; font-weight: bold; }
+        .status { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+        .status.completed { background: #d4edda; color: #155724; }
+        .status.running { background: #fff3cd; color: #856404; }
+        .status.error { background: #f8d7da; color: #721c24; }
+        .status.created { background: #e2e3e5; color: #383d41; }
+        .actions { display: flex; gap: 8px; }
+        .empty-state { text-align: center; padding: 40px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 Mes Projets de Scraping</h1>
+            <div>
+                <a href="/new_project" class="btn">➕ Nouveau Projet</a>
+                <a href="/" class="btn secondary">🏠 Dashboard</a>
+                <a href="/studio" class="btn purple">🧰 Studio</a>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>Liste des Projets</h2>
+            
+            {% if projects %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Nom</th>
+                        <th>Métier</th>
+                        <th>Pays</th>
+                        <th>Langue</th>
+                        <th>Statut</th>
+                        <th>Résultats</th>
+                        <th>Créé le</th>
+                        <th>Dernière Exécution</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for project in projects %}
+                    <tr>
+                        <td>{{ project[0] }}</td>
+                        <td><strong>{{ project[1] }}</strong></td>
+                        <td>{{ project[2] }}</td>
+                        <td>{{ project[3] }}</td>
+                        <td>{{ project[4] }}</td>
+                        <td><span class="status {{ project[5] }}">{{ project[5]|upper }}</span></td>
+                        <td>{{ project[6] or 0 }}</td>
+                        <td>{{ project[7][:10] if project[7] else '-' }}</td>
+                        <td>{{ project[8][:10] if project[8] else 'Jamais' }}</td>
+                        <td class="actions">
+                            {% if project[5] == 'created' or project[5] == 'error' %}
+                            <button class="btn success" onclick="startScraping({{ project[0] }})">▶️ Lancer</button>
+                            {% endif %}
+                            {% if project[6] and project[6] > 0 %}
+                            <a href="/results/{{ project[0] }}" class="btn">📊 Voir Résultats</a>
+                            <a href="/export/{{ project[0] }}" class="btn warning">📥 Export Excel</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <h3>Aucun projet créé</h3>
+                <p>Créez votre premier projet de scraping pour commencer.</p>
+                <a href="/new_project" class="btn">➕ Créer Mon Premier Projet</a>
+            </div>
+            {% endif %}
+        </div>
+        
+        {% if error %}
+        <div class="card" style="border-left: 4px solid #dc3545;">
+            <h3 style="color: #dc3545;">⚠️ Erreur</h3>
+            <p>{{ error }}</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        async function startScraping(projectId) {
+            if (!confirm('Lancer le scraping pour ce projet ?')) return;
+            
+            const button = event.target;
+            const originalText = button.textContent;
+            button.textContent = '⏳ En cours...';
+            button.disabled = true;
+            
+            try {
+                const response = await fetch(`/start_scraping/${projectId}`, { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('Scraping lancé ! La page se rechargera dans 2 secondes.');
+                    setTimeout(() => location.reload(), 2000);
+                } else {
+                    alert('Erreur lors du lancement: ' + (result.error || 'Erreur inconnue'));
+                    button.textContent = originalText;
+                    button.disabled = false;
+                }
+            } catch (error) {
+                alert('Erreur: ' + error.message);
+                button.textContent = originalText;
+                button.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
