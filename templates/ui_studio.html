@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>ScrapMaster Studio</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; color: #111; background: #f6f7f9; }
+    header { padding: 16px 20px; background: white; border-bottom: 1px solid #e6e8eb; position: sticky; top: 0; z-index: 10; }
+    h1 { margin: 0; font-size: 20px; }
+    main { display: grid; grid-template-columns: 360px 1fr; gap: 16px; padding: 16px; }
+    .panel { background: white; border: 1px solid #e6e8eb; border-radius: 12px; padding: 14px; }
+    .panel h2 { margin-top: 0; font-size: 16px; }
+    label { display: block; font-size: 12px; color: #5b6470; margin: 10px 0 6px; }
+    select, input[type="text"] { width: 100%; padding: 10px; border: 1px solid #d5d9de; border-radius: 8px; background: #fff; }
+    select[multiple] { min-height: 120px; }
+    button { padding: 10px 12px; border: 1px solid #111; background: #111; color: #fff; border-radius: 10px; cursor: pointer; }
+    button.secondary { background: #fff; color: #111; border-color: #d5d9de; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .muted { color: #5b6470; font-size: 12px; }
+    #log { background: #0b1020; color: #e7ecff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 10px; border-radius: 8px; overflow:auto; height: 120px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eef0f2; font-size: 13px; }
+    .editor { height: 380px; border: 1px solid #d5d9de; border-radius: 12px; overflow: hidden; background: #0b1020; }
+    textarea#code { width: 100%; height: 100%; border: 0; outline: none; color: #e7ecff; background: #0b1020; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+  <!-- CodeMirror CDN (fallback to textarea if blocked) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>🧰 ScrapMaster Studio — Recherches par type / pays / langues + Éditeur de scripts</h1>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Filtres</h2>
+      <label>Types (multi)</label>
+      <select id="types" multiple></select>
+
+      <label>Pays (multi)</label>
+      <select id="countries" multiple></select>
+
+      <!-- Bloc Langues avec bouton "Toutes les langues" -->
+      <div class="row" style="justify-content: space-between; align-items: baseline;">
+        <label>Langues (multi)</label>
+        <button class="secondary" type="button" id="selectAllLangs" style="padding:6px 8px;">Toutes les langues</button>
+      </div>
+      <select id="languages" multiple></select>
+
+      <label>Mots-clés (optionnel)</label>
+      <input id="keywords" type="text" placeholder="ex: association, expat, club, ONG, travelers…">
+
+      <div class="row" style="margin-top:10px;">
+        <button id="run">Lancer le scraping</button>
+        <button id="export" class="secondary">Exporter CSV</button>
+      </div>
+
+      <label style="margin-top:12px;">Journal</label>
+      <div id="log"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Éditeur de scripts</h2>
+      <div class="row">
+        <select id="scripts"></select>
+        <button id="load" class="secondary">Charger</button>
+        <button id="save">Enregistrer</button>
+      </div>
+      <div class="editor" style="margin-top:10px;">
+        <textarea id="code" spellcheck="false"></textarea>
+      </div>
+      <p class="muted">Astuce : crée un nouveau fichier dans <code>ScrapMaster/scrapers</code> (ex. <code>youtube_scraper.py</code>) puis recharge la liste.</p>
+
+      <h2 style="margin-top:18px;">Résultats récents</h2>
+      <div class="grid" id="stats"></div>
+      <div style="overflow:auto; max-height: 380px;">
+        <table id="table">
+          <thead>
+            <tr>
+              <th>Nom</th><th>Langues</th><th>Catégorie</th><th>Pays/Zone</th><th>Site</th><th>Facebook</th><th>Email</th><th>Téléphone</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script>
+  const $ = (q) => document.querySelector(q);
+  const log = (m) => { const el = $("#log"); el.textContent += (m + "\n"); el.scrollTop = el.scrollHeight; }
+  
+  // Variables globales pour la gestion des tâches
+  window._jobPoll = null;     // intervalle de polling en cours
+  window._logCursor = 0;      // (utile si tu choisis la variante sans backend)
+  window._currentJobId = null;
+
+  function resetLog() {
+    document.querySelector("#log").textContent = "";
+    window._logCursor = 0;
+  }
+
+  let editor = null;
+  function initEditor() {
+    try {
+      editor = CodeMirror.fromTextArea(document.getElementById("code"), {
+        mode: "python", lineNumbers: true, theme: "default"
+      });
+      editor.setSize(null, 360);
+    } catch (e) {
+      // Fallback : textarea
+      editor = null;
+    }
+  }
+
+  async function loadFilters() {
+    const r = await fetch("/studio/api/filters"); const data = await r.json();
+    for (const v of data.types) $("#types").insertAdjacentHTML("beforeend", `<option>${v}</option>`);
+    for (const v of data.countries) $("#countries").insertAdjacentHTML("beforeend", `<option>${v}</option>`);
+    for (const v of data.languages) $("#languages").insertAdjacentHTML("beforeend", `<option>${v}</option>`);
+  }
+
+  async function loadScripts() {
+    const r = await fetch("/studio/api/scripts"); const data = await r.json();
+    const sel = $("#scripts"); sel.innerHTML = "";
+    if ((data.scripts||[]).length === 0) sel.insertAdjacentHTML("beforeend", `<option value="">(aucun script trouvé)</option>`);
+    for (const s of data.scripts) sel.insertAdjacentHTML("beforeend", `<option value="${s}">${s}</option>`);
+  }
+
+  async function fetchRecent() {
+    try {
+      const r = await fetch("/api/recent_results"); // optional endpoint; fallback to /studio/api/export CSV
+      if (r.ok) {
+        const data = await r.json();
+        const tbody = $("#table tbody"); tbody.innerHTML = "";
+        (data.items||[]).slice(0, 100).forEach(it => {
+          tbody.insertAdjacentHTML("beforeend", `<tr>
+            <td>${it.nom_organisation||it.name||""}</td>
+            <td>${it.langues||it.language||""}</td>
+            <td>${it.categorie_principale||it.category||""}</td>
+            <td>${it.zone_couverte||it.country||""}</td>
+            <td><a href="${it.site_web||it.website||"#"}" target="_blank">site</a></td>
+            <td><a href="${it.facebook||"#"}" target="_blank">fb</a></td>
+            <td>${it.email||""}</td>
+            <td>${it.telephone||""}</td>
+          </tr>`)
+        })
+      }
+    } catch (e) {}
+  }
+
+  async function onLoadScript() {
+    const name = $("#scripts").value;
+    if (!name) return;
+    const r = await fetch(`/studio/api/script?name=${encodeURIComponent(name)}`);
+    if (!r.ok) { log("Erreur chargement script"); return; }
+    const data = await r.json();
+    if (editor) editor.setValue(data.content||""); else $("#code").value = data.content||"";
+    log(`Script chargé: ${name}`);
+  }
+
+  async function onSaveScript() {
+    const name = $("#scripts").value;
+    if (!name) { alert("Choisis un script à sauvegarder"); return; }
+    const content = editor ? editor.getValue() : $("#code").value;
+    const r = await fetch("/studio/api/script", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, content})
+    });
+    const data = await r.json();
+    log(data.ok ? `Script sauvegardé: ${name}` : "Erreur d'enregistrement");
+  }
+
+  async function onRun() {
+    // Stopper un éventuel ancien polling et vider le journal
+    if (window._jobPoll) { clearInterval(window._jobPoll); window._jobPoll = null; }
+    resetLog();
+    document.querySelector("#run").disabled = true;
+
+    const getSel = (id) => Array.from(document.getElementById(id).selectedOptions).map(o=>o.value);
+    const payload = {
+      types: getSel("types"),
+      countries: getSel("countries"),
+      languages: getSel("languages"),
+      keywords: document.querySelector("#keywords").value.trim() || null
+    };
+
+    const r = await fetch("/studio/api/run", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json();
+    if (!data.job_id) {
+      log("Impossible de démarrer la tâche");
+      document.querySelector("#run").disabled = false;
+      return;
+    }
+
+    window._currentJobId = data.job_id;
+    log("Tâche lancée: " + window._currentJobId);
+
+    // Nouveau polling, avec drain des logs côté serveur
+    window._jobPoll = setInterval(async () => {
+      const jr = await fetch(`/studio/api/jobs/${encodeURIComponent(window._currentJobId)}?drain=1`);
+      if (!jr.ok) return;
+      const j = await jr.json();
+
+      if (Array.isArray(j.log) && j.log.length) {
+        log(j.log.join("\n"));
+      }
+
+      if (j.status === "done" || j.status === "error") {
+        clearInterval(window._jobPoll);
+        window._jobPoll = null;
+        document.querySelector("#run").disabled = false;
+        // Optionnel : refresh du tableau si tu as implémenté fetchRecent()
+        // fetchRecent();
+      }
+    }, 1200);
+  }
+
+  document.addEventListener("DOMContentLoaded", async () => {
+    initEditor();
+    await loadFilters();
+    await loadScripts();
+    await fetchRecent();
+    $("#load").addEventListener("click", onLoadScript);
+    $("#save").addEventListener("click", onSaveScript);
+    $("#run").addEventListener("click", onRun);
+    $("#export").addEventListener("click", () => window.location.href="/studio/api/export");
+
+    // Bouton "Toutes les langues"
+    document.getElementById('selectAllLangs').addEventListener('click', () => {
+      const sel = document.getElementById('languages');
+      for (const opt of sel.options) opt.selected = true;
+    });
+  });
+  </script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ScrapMaster - Version Simple</title>
+    <style>
+        body { font-family: Arial; margin: 40px; background: #f5f5f5; }
+        .card { background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        .btn:hover { background: #0056b3; }
+        .stats { display: flex; gap: 20px; }
+        .stat-box { background: #007bff; color: white; padding: 20px; border-radius: 8px; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>🕷️ ScrapMaster Dashboard</h1>
+    
+    <div class="stats">
+        <div class="stat-box">
+            <h3>{{ total_projects or 0 }}</h3>
+            <p>Projets Total</p>
+        </div>
+        <div class="stat-box">
+            <h3>{{ total_results or 0 }}</h3>
+            <p>Résultats</p>
+        </div>
+        <div class="stat-box">
+            <h3>{{ active_projects or 0 }}</h3>
+            <p>En Cours</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>🚀 Actions Rapides</h2>
+        <button class="btn" onclick="location.href='/new_project'">Nouveau Projet</button>
+        <button class="btn" onclick="location.href='/projects'">Voir Projets</button>
+        <button class="btn" onclick="location.href='/settings'">Paramètres</button>
+    </div>
+
+    <div class="card">
+        <h2>📋 Métiers Disponibles</h2>
+        <p>YouTubeurs • Avocats • Associations • Traducteurs • Digital Nomads</p>
+    </div>
+
+    <div class="card">
+        <h2>🌍 Zones Géographiques</h2>
+        <p>Thaïlande • France • Expatriés • Digital Nomads Asie</p>
+    </div>
+</body>
+</html>

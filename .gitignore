@@ -1,0 +1,22 @@
+# Environnements / dépendances locales
+.venv/
+env/
+venv/
+__pycache__/
+*.pyc
+
+# Fichiers temporaires / backups
+*.bak
+*.log
+
+# Données locales à NE PAS pousser
+database/
+exports/
+*.db
+*.sqlite
+
+# Archives lourdes
+*.zip
+
+# VS Code
+.vscode/
