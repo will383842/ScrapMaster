@@ -1,9 +1,9 @@
 # DÉPENDANCES SCRAPMASTER - VERSION MINIMALE FONCTIONNELLE
-# Version : 2025-01-01 (Compatible Windows sans compilation)
+# Version : 2025-09-06 (Windows-friendly)
 
 # === Core Framework ===
 Flask==3.0.0
-Werkzeug
+Werkzeug>=3.0.0,<4.0.0
 
 # === Web Scraping ===
 requests==2.31.0
@@ -13,12 +13,18 @@ beautifulsoup4==4.12.2
 python-dateutil==2.8.2
 pytz==2023.3
 
-# === Optionnel (ajouter si besoin) ===
-# langdetect    # Détection de langue (optionnel)
-# phonenumbers  # Normalisation téléphones (optionnel)  
-# rapidfuzz     # Déduplication (optionnel)
-# lxml          # Parser XML rapide (optionnel)
-# pandas        # Export Excel (optionnel - CSV sinon)
-# openpyxl      # Excel (optionnel)
+# === Export XLSX (recommandé pour /studio/api/export?template=en) ===
+pandas>=2.0,<3
+openpyxl>=3.1,<4
 
-# Note: L'application fonctionne parfaitement avec les packages de base
+# === Recommandés (améliorent la qualité des données) ===
+langdetect==1.0.9        # détection langue (utilisé par detect_lang)
+phonenumbers==8.13.39    # normalisation téléphones (E.164)
+rapidfuzz==3.6.1         # dédup fuzzy rapide et fiable
+
+# === Optionnels (accélèrent/parsent mieux) ===
+# lxml                    # parser HTML/XML plus rapide ; facultatif sur Windows
+
+# Notes :
+# - pandas + openpyxl activent l’export Excel « modèle EN ». Sans eux, fallback CSV.
+# - phonenumbers/langdetect/rapidfuzz sont pur-Python (pas de compilation).

@@ -34,9 +34,19 @@ class GenericScraper:
         'Japon': 'JP', 'Japan': 'JP'
     }
 
+    # Heuristiques pour détecter un nom de contact
+    CONTACT_PATTERNS = [
+        r"(?:Contact(?: person)?|Responsable|Président|Présidente|Secrétariat|Secrétaire|Directeur|Directrice)\s*[:\-]\s*([A-Z][a-zÀ-ÖØ-öø-ÿ]+(?:\s+[A-Z][a-zÀ-ÖØ-öø-ÿ]+)+)",
+        r"(?:Mr\.?|Mme\.?|Mlle\.?|Dr\.?)\s+([A-Z][a-zÀ-ÖØ-öø-ÿ]+(?:\s+[A-Z][a-zÀ-ÖØ-öø-ÿ]+)+)"
+    ]
+
     def __init__(self):
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0 Safari/537.36'
+            )
         }
 
     # --------------------- Public API ---------------------
@@ -179,13 +189,14 @@ class GenericScraper:
                         description = ' '.join(desc_parts).strip()
                         break
 
-                # Filtrage (langue/keywords si besoin) + règle mini
+                # Filtrage (keywords optionnel) + règle mini
                 if self.matches_filters(line, description, config):
-                    if website or len(description) > 15:
+                    keep_incomplete = bool(config.get("keep_incomplete", True))
+                    if website or len(description) > 15 or keep_incomplete:
                         entry = self.create_entry(
                             name=line,
-                            website=website,
-                            description=description,
+                            website=website or None,
+                            description=description or None,
                             category=category,
                             source_url=source_url,
                             config=config
@@ -202,6 +213,17 @@ class GenericScraper:
         return entries
 
     # --------------------- Heuristiques & utilitaires ---------------------
+
+    def extract_contact_name(self, text):
+        """Essaye de retrouver un nom de contact dans un bloc de texte HTML/texte."""
+        if not text:
+            return None
+        t = " ".join(str(text).split())
+        for pat in self.CONTACT_PATTERNS:
+            m = re.search(pat, t, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        return None
 
     def is_valid_name(self, text):
         """Heuristique : ressemble à un nom d'organisation ?"""
@@ -241,7 +263,7 @@ class GenericScraper:
         text = text.strip().lower()
         return (
             text.startswith(('www.', 'http://', 'https://')) or
-            any(ext in text for ext in ['.com', '.org', '.net', '.fr', '.th', '.co.uk', '.io', '.co'])
+            any(ext in text for ext in ['.com', '.org', '.net', '.fr', '.th', '.co.uk', '.io', '.co', '.info'])
         )
 
     def clean_url(self, url):
@@ -266,10 +288,12 @@ class GenericScraper:
         return len(words) >= 3
 
     def matches_filters(self, name, description, config):
-        """Vérifie les filtres (langue, etc.). Ici on reste permissif."""
-        # Exemple : si config['language'] est précis, on pourrait filtrer,
-        # mais par défaut on **accepte** pour maximiser la remontée.
-        return True
+        """Filtre optionnel sur des mots-clés ; sinon accepte pour maximiser la remontée."""
+        kw = (config.get('keywords') or '').strip().lower()
+        if not kw:
+            return True
+        blob = f"{name or ''} {description or ''}".lower()
+        return kw in blob
 
     def country_to_region(self, country):
         """Convertit un nom de pays en code région (E.164)."""
@@ -299,7 +323,7 @@ class GenericScraper:
         language_guess = detect_lang(f"{name} {description}", website) or 'unknown'
 
         return {
-            'name': name.strip(),
+            'name': (name or "").strip(),
             'category': category,
             'description': (description or "").strip(),
             'website': website or None,
@@ -313,12 +337,11 @@ class GenericScraper:
             'scraped_at': datetime.now().isoformat(),
             'quality_score': self.calculate_quality_score(name, website, description),
             # champ interne utile à la dédup
-            'normalized_name': normalize_name(name)
+            'normalized_name': normalize_name(name or "")
         }
 
     def enrich_contacts(self, entry, config):
         """Renforce email/téléphone/réseaux/langue/ville à partir de la page du site + description."""
-
         texts = [entry.get('description', '')]
 
         # Récupérer le HTML de la home si un site est présent
@@ -329,25 +352,40 @@ class GenericScraper:
 
         blob = " ".join(texts)
 
+        # ---- Nom de contact (heuristique) ----
+        if not entry.get('contact_name'):
+            cn = self.extract_contact_name(blob)
+            if cn:
+                entry['contact_name'] = cn
+
         # ---- Emails (tous, dédupliqués) ----
         emails = set(extract_emails(blob))
         if entry.get('email'):
-            emails.add(entry['email'])
+            # entry['email'] peut déjà contenir plusieurs emails séparés ; on split
+            for e in str(entry['email']).replace(',', ';').split(';'):
+                e = e.strip()
+                if e:
+                    emails.add(e)
         entry['email'] = "; ".join(sorted(emails)) if emails else None
 
         # ---- Téléphones (E.164 selon le pays) ----
         raw_phones = extract_phones(blob)
         if entry.get('phone'):
-            raw_phones.append(entry['phone'])
+            raw_phones.extend([p.strip() for p in str(entry['phone']).replace(',', ';').split(';') if p.strip()])
         region = self.country_to_region(entry.get('country'))
         phones_norm = normalize_phone_list(raw_phones, default_region=region)
         entry['phone'] = "; ".join(phones_norm) if phones_norm else None
 
         # ---- Réseaux sociaux (prend le premier lien trouvé pour chaque type) ----
         socials = extract_socials(blob)
-        for k, v in socials.items():
-            if v and not entry.get(k):
-                entry[k] = normalize_url(v[0])
+        # On pose tous les champs retournés par extract_socials si absents
+        if isinstance(socials, dict):
+            for k, v in socials.items():
+                if v:
+                    # v peut être une liste : on prend le premier lien
+                    link = v[0] if isinstance(v, (list, tuple)) and v else v
+                    if link and not entry.get(k):
+                        entry[k] = normalize_url(link)
 
         # ---- Langue (si inconnue) ----
         if not entry.get('language') or entry['language'] == 'unknown':
@@ -358,7 +396,7 @@ class GenericScraper:
             entry['city'] = normalize_location(entry['city'])
 
         # ---- Nom normalisé (utile à la dédup) ----
-        entry['normalized_name'] = normalize_name(entry.get('name'))
+        entry['normalized_name'] = normalize_name(entry.get('name') or "")
 
         return entry
 

@@ -82,7 +82,7 @@ class ScrapMasterApp:
             )
             ''')
             
-            # Table des résultats
+            # Table des résultats (schéma de base)
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,6 +101,30 @@ class ScrapMasterApp:
                 FOREIGN KEY (project_id) REFERENCES projects (id)
             )
             ''')
+
+            # --- Migration douce : ajouter des colonnes si manquantes dans 'results' ---
+            def add_column_if_missing(cursor, table, column, coltype):
+                cursor.execute(f"PRAGMA table_info({table})")
+                cols = [r[1] for r in cursor.fetchall()]
+                if column not in cols:
+                    try:
+                        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+                    except Exception:
+                        pass  # déjà là ou autre
+
+            # Colonnes étendues pour stocker plus d'infos de contact
+            add_column_if_missing(cursor, "results", "facebook", "TEXT")
+            add_column_if_missing(cursor, "results", "instagram", "TEXT")
+            add_column_if_missing(cursor, "results", "linkedin", "TEXT")
+            add_column_if_missing(cursor, "results", "line_id", "TEXT")
+            add_column_if_missing(cursor, "results", "whatsapp", "TEXT")
+            add_column_if_missing(cursor, "results", "other_contact", "TEXT")
+            add_column_if_missing(cursor, "results", "contact_name", "TEXT")
+            add_column_if_missing(cursor, "results", "province", "TEXT")
+            add_column_if_missing(cursor, "results", "address", "TEXT")
+            add_column_if_missing(cursor, "results", "latitude", "TEXT")
+            add_column_if_missing(cursor, "results", "longitude", "TEXT")
+            add_column_if_missing(cursor, "results", "raw_json", "TEXT")
             
             # Table des métiers
             cursor.execute('''
@@ -174,7 +198,7 @@ class ScrapMasterApp:
                 ('Voyageurs Asie du Sud-Est', 'Voyageurs en Asie du Sud-Est', 'travelers_sea_sources.json'),
                 ('Royaume-Uni', 'Royaume-Uni de Grande-Bretagne', 'uk_sources.json'),
                 ('États-Unis', "États-Unis d'Amérique", 'usa_sources.json'),
-                ('Allemagne', 'République fédérale d\'Allemagne', 'germany_sources.json')
+                ('Allemagne', "République fédérale d'Allemagne", 'germany_sources.json')
             ]
             for country in countries:
                 cursor.execute(
@@ -352,7 +376,21 @@ def start_scraping(project_id):
             
             # Récupérer les infos du projet
             cursor.execute('SELECT * FROM projects WHERE id = ?', (project_id,))
-            project = cursor.fetchone()
+project_row = cursor.fetchone()
+if not project_row:
+    raise Exception(f"Projet {project_id} introuvable")
+
+# ► Adapter la Row en dict + décoder sources JSON
+project_cfg = dict(project_row)
+try:
+    project_cfg["sources"] = json.loads(project_cfg.get("sources") or "[]")
+except Exception:
+    project_cfg["sources"] = []
+project_cfg["keep_incomplete"] = True
+
+# Lancer le scraping via le moteur avec un dict
+results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
+
             
             if not project:
                 raise Exception(f"Projet {project_id} introuvable")
@@ -362,27 +400,64 @@ def start_scraping(project_id):
             
             # Sauvegarder les résultats
             saved_count = 0
-            for result in results:
+            for r in results:
                 try:
-                    cursor.execute('''
-                    INSERT INTO results (
-                        project_id, name, category, description, website, 
-                        email, phone, city, country, language, source_url
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        project_id,
-                        result.get('name', '')[:500],
-                        result.get('category', '')[:200],
-                        result.get('description', '')[:2000],
-                        result.get('website', '')[:500],
-                        result.get('email', '')[:200],
-                        result.get('phone', '')[:50],
-                        result.get('city', '')[:200],
-                        result.get('country', '')[:100],
-                        result.get('language', '')[:10],
-                        result.get('source_url', '')[:500]
-                    ))
+                    try:
+                        # Tentative : insert avec colonnes étendues
+                        cursor.execute("""
+                            INSERT INTO results (
+                                project_id, name, category, description, website,
+                                email, phone, city, country, language, source_url,
+                                facebook, instagram, linkedin, line_id, whatsapp,
+                                other_contact, contact_name, province, address,
+                                latitude, longitude, raw_json, scraped_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        """, (
+                            project_id,
+                            (r.get('name') or '')[:500],
+                            r.get('category'),
+                            (r.get('description') or '')[:2000],
+                            r.get('website'),
+                            r.get('email'),
+                            r.get('phone'),
+                            r.get('city'),
+                            r.get('country'),
+                            r.get('language'),
+                            r.get('source_url'),
+                            r.get('facebook'),
+                            r.get('instagram'),
+                            r.get('linkedin'),
+                            r.get('line_id'),
+                            r.get('whatsapp'),
+                            r.get('other_contact'),
+                            r.get('contact_name'),
+                            r.get('province'),
+                            r.get('address'),
+                            r.get('latitude'),
+                            r.get('longitude'),
+                            json.dumps(r, ensure_ascii=False)
+                        ))
+                    except Exception:
+                        # Fallback : schéma minimal (compat ancien)
+                        cursor.execute('''
+                            INSERT INTO results (
+                                project_id, name, category, description, website, 
+                                email, phone, city, country, language, source_url, scraped_at
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ''', (
+                            project_id,
+                            (r.get('name') or '')[:500],
+                            r.get('category'),
+                            (r.get('description') or '')[:2000],
+                            r.get('website'),
+                            r.get('email'),
+                            r.get('phone'),
+                            r.get('city'),
+                            r.get('country'),
+                            r.get('language'),
+                            r.get('source_url')
+                        ))
                     saved_count += 1
                 except Exception as e:
                     print(f"⚠️ Erreur sauvegarde résultat: {e}")
@@ -513,6 +588,7 @@ def export_results(project_id):
             # Export CSV simple
             import csv
             import io
+            from flask import Response
             
             output = io.StringIO()
             writer = csv.writer(output)
@@ -521,7 +597,6 @@ def export_results(project_id):
             
             conn.close()
             
-            from flask import Response
             return Response(
                 output.getvalue(),
                 mimetype="text/csv",

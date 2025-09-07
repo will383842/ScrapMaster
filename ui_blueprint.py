@@ -33,6 +33,7 @@ def load_script_content(name):
 
 def save_script_content(name, content):
     path = os.path.join(SCRAPERS_DIR, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     if not os.path.exists(path):
         # allow creating new script
         open(path, "a", encoding="utf-8").close()
@@ -132,7 +133,28 @@ def run_job(job_id, payload):
 
                         # 2. Récupérer la ligne complète (format tuple attendu par le moteur)
                         cur.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
-                        project_row = cur.fetchone()
+project_row = cur.fetchone()
+if not project_row:
+    raise Exception("Projet non créé en base")
+
+# ► Adapter la Row en dict + décoder sources JSON
+project_cfg = dict(project_row)
+try:
+    project_cfg["sources"] = json.loads(project_cfg.get("sources") or "[]")
+except Exception:
+    project_cfg["sources"] = []
+
+# ► Surcharger au cas où (sécurité)
+project_cfg["profession"] = project_cfg.get("profession") or profession
+project_cfg["country"]    = project_cfg.get("country") or country
+project_cfg["language"]   = project_cfg.get("language") or language
+project_cfg["keep_incomplete"] = True  # on garde les entrées même incomplètes
+
+JOBS[job_id]["log"].append(f"📋 Projet #{project_id} créé")
+
+# Appeler le moteur avec un dict (pas une Row)
+results = engine.run_scraping(project_cfg) or []
+
                         
                         if not project_row:
                             raise Exception("Projet non créé en base")
@@ -147,26 +169,63 @@ def run_job(job_id, payload):
 
                         # 4. Sauvegarder les résultats avec gestion d'erreurs
                         saved_count = 0
-                        for i, result in enumerate(results):
+                        for i, r in enumerate(results):
                             try:
-                                cur.execute("""
-                                    INSERT INTO results (
-                                        project_id, name, category, description, website,
-                                        email, phone, city, country, language, source_url, scraped_at
-                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                                """, (
-                                    project_id,
-                                    result.get('name', '')[:500],  # Limitation de taille
-                                    result.get('category', ''),
-                                    result.get('description', '')[:2000],
-                                    result.get('website', ''),
-                                    result.get('email', ''),
-                                    result.get('phone', ''),
-                                    result.get('city', ''),
-                                    result.get('country', country),
-                                    result.get('language', language),
-                                    result.get('source_url', '')
-                                ))
+                                # --- Tentative : insert avec colonnes étendues (contact/réseaux/coords + raw_json) ---
+                                try:
+                                    cur.execute("""
+                                        INSERT INTO results (
+                                            project_id, name, category, description, website,
+                                            email, phone, city, country, language, source_url,
+                                            facebook, instagram, linkedin, line_id, whatsapp,
+                                            other_contact, contact_name, province, address,
+                                            latitude, longitude, raw_json, scraped_at
+                                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                                    """, (
+                                        project_id,
+                                        (r.get('name') or '')[:500],
+                                        r.get('category'),
+                                        (r.get('description') or '')[:2000],
+                                        r.get('website'),
+                                        r.get('email'),
+                                        r.get('phone'),
+                                        r.get('city'),
+                                        r.get('country', country),
+                                        r.get('language', language),
+                                        r.get('source_url'),
+                                        r.get('facebook'),
+                                        r.get('instagram'),
+                                        r.get('linkedin'),
+                                        r.get('line_id'),
+                                        r.get('whatsapp'),
+                                        r.get('other_contact'),
+                                        r.get('contact_name'),
+                                        r.get('province'),
+                                        r.get('address'),
+                                        r.get('latitude'),
+                                        r.get('longitude'),
+                                        json.dumps(r, ensure_ascii=False)
+                                    ))
+                                except Exception:
+                                    # --- Fallback : schéma minimal (compat ancien) ---
+                                    cur.execute("""
+                                        INSERT INTO results (
+                                            project_id, name, category, description, website,
+                                            email, phone, city, country, language, source_url, scraped_at
+                                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                                    """, (
+                                        project_id,
+                                        (r.get('name') or '')[:500],
+                                        r.get('category'),
+                                        (r.get('description') or '')[:2000],
+                                        r.get('website'),
+                                        r.get('email'),
+                                        r.get('phone'),
+                                        r.get('city'),
+                                        r.get('country', country),
+                                        r.get('language', language),
+                                        r.get('source_url')
+                                    ))
                                 saved_count += 1
                             except Exception as e:
                                 JOBS[job_id]["log"].append(f"⚠️ Erreur sauvegarde résultat #{i+1}: {str(e)[:100]}")
@@ -343,25 +402,17 @@ def api_job(job_id):
 @bp.route("/api/export", methods=["GET"])
 def api_export():
     """
-    Exporte la table results vers un CSV mappé sur la trame Excel.
-    Remplit les colonnes manquantes avec des vides et renomme les champs clés.
+    Exporte la table results.
+      - template=fr (défaut) : CSV FR (trame actuelle)
+      - template=en : XLSX « modèle EN » (comme l’exemple), avec remplissage max
     """
-    # Définition de la trame Excel cible
-    excel_columns = [
-        "id","nom_organisation","statut_juridique","categorie_principale","sous_categories",
-        "langues","public_cible","zone_couverte","adresse_postale","telephone","email","site_web",
-        "facebook","instagram","linkedin","line_id_ou_lien","whatsapp","autre_contact",
-        "personne_contact","horaires","cout_adhesion","conditions_acces","services_offerts",
-        "description","annee_creation","numero_enregistrement","taille_membres","evenements_reguliers",
-        "partenaires_affiliations","organisation_parente","chapitres_locaux","mots_cles",
-        "source_url_principale","sources_secondaires","date_verification","fiabilite","commentaire_notes"
-    ]
-    
+    template = (request.args.get("template") or "fr").lower()
+
     conn = get_db()
     try:
-        # Chargement des données avec pandas si disponible
+        # Charge les données avec pandas si dispo
         try:
-            import pandas as pd
+            import pandas as pd  # type: ignore
             df = pd.read_sql_query("""
                 SELECT r.*, p.name as project_name, p.profession 
                 FROM results r 
@@ -369,9 +420,179 @@ def api_export():
                 ORDER BY r.id DESC 
                 LIMIT 10000
             """, conn)
-        except ImportError:
+        except Exception:
+            df = None
+
+        if template == "en":
+            # ===== Export XLSX modèle EN =====
+            try:
+                import pandas as pd
+                import json as _json
+
+                cols = [
+                    "name","category","short_description","languages","city","province","coverage_area","address",
+                    "latitude","longitude","email","phone","whatsapp","line_id","website",
+                    "facebook_url","instagram_url","linkedin_url","line_link","whatsapp_link","other_contact",
+                    "contact_name","opening_hours","membership_fee","access_conditions","services_offered",
+                    "description","founded_year","registration_number","members_size",
+                    "regular_events","affiliations","parent_org","local_chapters","keywords",
+                    "source_urls","last_verified_date","verification_method","status","risk_flags","quality_score",
+                    "firm_name","lawyer_name","practice_areas","bar_or_license_no","years_experience",
+                    "consultation_modes","consultation_languages","fee_structure","emergency_hotline"
+                ]
+
+                # Construire records (avec ou sans pandas)
+                records = []
+                if df is None:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT r.*, p.name as project_name, p.profession 
+                        FROM results r 
+                        LEFT JOIN projects p ON r.project_id = p.id 
+                        ORDER BY r.id DESC 
+                        LIMIT 10000
+                    """)
+                    rows = cur.fetchall()
+                    headers = [d[0] for d in cur.description]
+                    for row in rows:
+                        records.append(dict(zip(headers, row)))
+                else:
+                    records = df.to_dict(orient="records")
+
+                def take(row, *keys):
+                    for k in keys:
+                        v = row.get(k)
+                        if v is not None and str(v).strip():
+                            return v
+                    # fallback dans raw_json
+                    try:
+                        raw = row.get("raw_json")
+                        if raw:
+                            rawj = _json.loads(raw)
+                            for k in keys:
+                                v = rawj.get(k)
+                                if v:
+                                    return v
+                    except Exception:
+                        pass
+                    return None
+
+                out_rows = []
+                for row in records:
+                    out_rows.append({
+                        "name": take(row, "name", "nom_organisation"),
+                        "category": take(row, "category", "categorie_principale"),
+                        "short_description": take(row, "short_description", "description_courte"),
+                        "languages": take(row, "language", "langues"),
+                        "city": take(row, "city", "ville"),
+                        "province": take(row, "province", "departement", "state"),
+                        "coverage_area": take(row, "zone_couverte", "coverage_area", "country"),
+                        "address": take(row, "address", "adresse_postale"),
+                        "latitude": take(row, "latitude"),
+                        "longitude": take(row, "longitude"),
+                        "email": take(row, "email"),
+                        "phone": take(row, "phone", "telephone"),
+                        "whatsapp": take(row, "whatsapp"),
+                        "line_id": take(row, "line_id"),
+                        "website": take(row, "website", "site_web"),
+                        "facebook_url": take(row, "facebook", "facebook_url"),
+                        "instagram_url": take(row, "instagram", "instagram_url"),
+                        "linkedin_url": take(row, "linkedin", "linkedin_url"),
+                        "line_link": take(row, "line_link"),
+                        "whatsapp_link": take(row, "whatsapp_link"),
+                        "other_contact": take(row, "other_contact"),
+                        "contact_name": take(row, "contact_name", "personne_contact"),
+                        "opening_hours": take(row, "horaires", "opening_hours"),
+                        "membership_fee": take(row, "cout_adhesion", "membership_fee"),
+                        "access_conditions": take(row, "conditions_acces", "access_conditions"),
+                        "services_offered": take(row, "services_offerts", "services_offered"),
+                        "description": take(row, "description"),
+                        "founded_year": take(row, "annee_creation", "founded_year"),
+                        "registration_number": take(row, "numero_enregistrement", "registration_number"),
+                        "members_size": take(row, "taille_membres", "members_size"),
+                        "regular_events": take(row, "evenements_reguliers", "regular_events"),
+                        "affiliations": take(row, "partenaires_affiliations", "affiliations"),
+                        "parent_org": take(row, "organisation_parente", "parent_org"),
+                        "local_chapters": take(row, "chapitres_locaux", "local_chapters"),
+                        "keywords": take(row, "mots_cles", "keywords"),
+                        "source_urls": take(row, "source_urls", "source_url", "source_url_principale"),
+                        "last_verified_date": take(row, "date_verification", "last_verified_date"),
+                        "verification_method": take(row, "verification_method"),
+                        "status": take(row, "status"),
+                        "risk_flags": take(row, "risk_flags"),
+                        "quality_score": take(row, "quality_score"),
+                        "firm_name": take(row, "firm_name"),
+                        "lawyer_name": take(row, "lawyer_name"),
+                        "practice_areas": take(row, "practice_areas"),
+                        "bar_or_license_no": take(row, "bar_or_license_no"),
+                        "years_experience": take(row, "years_experience"),
+                        "consultation_modes": take(row, "consultation_modes"),
+                        "consultation_languages": take(row, "consultation_languages"),
+                        "fee_structure": take(row, "fee_structure"),
+                        "emergency_hotline": take(row, "emergency_hotline"),
+                    })
+
+                out_df = pd.DataFrame(out_rows, columns=cols)
+
+                # Export XLSX (openpyxl) ou fallback CSV si indispo
+                try:
+                    with pd.ExcelWriter("export_scrapmaster_en.xlsx", engine="openpyxl") as writer:
+                        out_df.to_excel(writer, index=False, sheet_name="Feuil1")
+                    return send_file("export_scrapmaster_en.xlsx", as_attachment=True, download_name="export_scrapmaster_en.xlsx")
+                except Exception:
+                    csv_buf = io.StringIO()
+                    out_df.to_csv(csv_buf, index=False)
+                    csv_buf.seek(0)
+                    return current_app.response_class(
+                        csv_buf.getvalue(),
+                        mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=export_scrapmaster_en.csv"}
+                    )
+            finally:
+                conn.close()
+
+        # ===== Export FR (CSV) : ta trame actuelle =====
+        try:
+            import pandas as pd  # type: ignore
+            if df is None:
+                raise RuntimeError("pandas non disponible")
+
+            excel_columns = [
+                "id","nom_organisation","statut_juridique","categorie_principale","sous_categories",
+                "langues","public_cible","zone_couverte","adresse_postale","telephone","email","site_web",
+                "facebook","instagram","linkedin","line_id_ou_lien","whatsapp","autre_contact",
+                "personne_contact","horaires","cout_adhesion","conditions_acces","services_offerts",
+                "description","annee_creation","numero_enregistrement","taille_membres","evenements_reguliers",
+                "partenaires_affiliations","organisation_parente","chapitres_locaux","mots_cles",
+                "source_url_principale","sources_secondaires","date_verification","fiabilite","commentaire_notes"
+            ]
+
+            column_mapping = {
+                "name": "nom_organisation",
+                "category": "categorie_principale",
+                "website": "site_web", 
+                "phone": "telephone",
+                "language": "langues",
+                "country": "zone_couverte",
+                "source_url": "source_url_principale"
+            }
+            for db_col, excel_col in column_mapping.items():
+                if db_col in df.columns and excel_col not in df.columns:
+                    df[excel_col] = df[db_col]
+
+            for col in excel_columns:
+                if col not in df.columns:
+                    df[col] = ""
+
+            df = df[excel_columns]
+
+            output = io.StringIO()
+            df.to_csv(output, index=False, encoding='utf-8')
+            output.seek(0)
+
+        except Exception:
             # Fallback sans pandas
-            cur = conn.cursor()
+            cur = conn.cursor() 
             cur.execute("""
                 SELECT r.*, p.name as project_name, p.profession 
                 FROM results r 
@@ -380,15 +601,22 @@ def api_export():
                 LIMIT 10000
             """)
             rows = cur.fetchall()
-            
-            # Conversion manuelle en CSV
+
             output = io.StringIO()
             if rows:
-                # Headers
-                headers = [desc[0] for desc in cur.description]
+                # Écrire les entêtes de la trame FR
+                excel_columns = [
+                    "id","nom_organisation","statut_juridique","categorie_principale","sous_categories",
+                    "langues","public_cible","zone_couverte","adresse_postale","telephone","email","site_web",
+                    "facebook","instagram","linkedin","line_id_ou_lien","whatsapp","autre_contact",
+                    "personne_contact","horaires","cout_adhesion","conditions_acces","services_offerts",
+                    "description","annee_creation","numero_enregistrement","taille_membres","evenements_reguliers",
+                    "partenaires_affiliations","organisation_parente","chapitres_locaux","mots_cles",
+                    "source_url_principale","sources_secondaires","date_verification","fiabilite","commentaire_notes"
+                ]
                 output.write(','.join(f'"{h}"' for h in excel_columns) + '\n')
-                
-                # Mapping des colonnes
+
+                headers = [desc[0] for desc in cur.description]
                 col_mapping = {
                     "name": "nom_organisation",
                     "category": "categorie_principale", 
@@ -398,85 +626,50 @@ def api_export():
                     "country": "zone_couverte",
                     "source_url": "source_url_principale"
                 }
-                
-                # Données
+
                 for row in rows:
                     row_dict = dict(zip(headers, row))
                     csv_row = []
                     for col in excel_columns:
-                        # Recherche de la valeur avec mapping
                         value = ""
                         if col in row_dict:
                             value = str(row_dict[col] or "")
                         else:
-                            # Recherche inverse dans le mapping
                             for db_col, excel_col in col_mapping.items():
                                 if excel_col == col and db_col in row_dict:
                                     value = str(row_dict[db_col] or "")
                                     break
-                        
-                        # Échapper les guillemets
                         value = value.replace('"', '""')
                         csv_row.append(f'"{value}"')
-                    
                     output.write(','.join(csv_row) + '\n')
-            
-            conn.close()
-            output.seek(0)
-            
-            return current_app.response_class(
-                output.getvalue(),
-                mimetype="text/csv",
-                headers={"Content-Disposition": "attachment; filename=export_scrapmaster.csv"}
-            )
-        
-        # Version pandas
-        # Renommage des colonnes pour correspondre à la trame Excel
-        column_mapping = {
-            "name": "nom_organisation",
-            "category": "categorie_principale",
-            "website": "site_web", 
-            "phone": "telephone",
-            "language": "langues",
-            "country": "zone_couverte",
-            "source_url": "source_url_principale"
-        }
-        
-        for db_col, excel_col in column_mapping.items():
-            if db_col in df.columns and excel_col not in df.columns:
-                df[excel_col] = df[db_col]
-        
-        # Ajout des colonnes manquantes avec valeurs vides
-        for col in excel_columns:
-            if col not in df.columns:
-                df[col] = ""
-        
-        # Réordonnancement selon la trame Excel
-        df = df[excel_columns]
-        
-        # Export en CSV
-        output = io.StringIO()
-        df.to_csv(output, index=False, encoding='utf-8')
-        output.seek(0)
-        
+
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    
     except Exception as e:
-        # En cas d'erreur, export basique
-        cur = conn.cursor() 
-        cur.execute("SELECT * FROM results ORDER BY id DESC LIMIT 1000")
-        rows = cur.fetchall()
-        
-        output = io.StringIO()
-        if rows:
-            headers = [desc[0] for desc in cur.description]
-            output.write(','.join(f'"{h}"' for h in headers) + '\n')
-            for row in rows:
-                csv_row = [f'"{str(val or "").replace(chr(34), chr(34)+chr(34))}"' for val in row]
-                output.write(','.join(csv_row) + '\n')
-        output.seek(0)
-    
-    finally:
-        conn.close()
-    
+        # Dernier filet de sécurité : export brut
+        try:
+            cur = conn.cursor() 
+            cur.execute("SELECT * FROM results ORDER BY id DESC LIMIT 1000")
+            rows = cur.fetchall()
+            output = io.StringIO()
+            if rows:
+                headers = [desc[0] for desc in cur.description]
+                output.write(','.join(f'"{h}"' for h in headers) + '\n')
+                for row in rows:
+                    csv_row = [f'"{str(val or "").replace(chr(34), chr(34)+chr(34))}"' for val in row]
+                    output.write(','.join(csv_row) + '\n')
+            output.seek(0)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # Réponse FR (CSV) par défaut
     return current_app.response_class(
         output.getvalue(),
         mimetype="text/csv; charset=utf-8",
