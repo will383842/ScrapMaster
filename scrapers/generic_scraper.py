@@ -232,15 +232,34 @@ class GenericScraper:
     # --------------------- Extraction structurelle ---------------------
 
     def extract_data_from_page(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
-        """Extraction basée sur la structure HTML"""
+        """Extraction basée sur structure HTML + données structurées AVANCÉES"""
         entries: List[dict] = []
 
+        # NOUVEAU: Extraction de données structurées AVANT tout le reste
+        try:
+            from extractors.structured_data_extractor import structured_extractor
+            
+            html_content = str(soup)
+            structured_entries = structured_extractor.extract_all_structured_data(html_content, source_url)
+            
+            # Convertir en format compatible
+            for structured_item in structured_entries:
+                converted_entry = self._convert_structured_to_entry(structured_item, category, config, source_url)
+                if converted_entry:
+                    entries.append(converted_entry)
+                    
+            logger.info(f"📊 Données structurées: {len(structured_entries)} entrées extraites")
+            
+        except Exception as e:
+            logger.warning(f"Erreur extraction données structurées: {e}")
+
+        # Extracteurs HTML classiques (code existant)
         extractors = [
-            self._extract_from_lists,      # <ul>, <ol> avec liens
-            self._extract_from_tables,     # <table> avec données
-            self._extract_from_cards,      # Divs avec classe card/item
-            self._extract_from_links,      # Tous les liens avec contexte
-            self._extract_from_text        # Fallback ligne par ligne
+            self._extract_from_lists,
+            self._extract_from_tables,
+            self._extract_from_cards,
+            self._extract_from_links,
+            self._extract_from_text
         ]
 
         for extractor in extractors:
@@ -248,13 +267,73 @@ class GenericScraper:
                 results = extractor(soup, source_url, category, config)
                 if results:
                     entries.extend(results)
-                    logger.info("Extractor OK", extra={"name": extractor.__name__, "count": len(results)})
-                    break  # Premier extracteur qui fonctionne
+                    logger.info(f"✅ {extractor.__name__}: {len(results)} entrées")
+                    
+                    # Si on a déjà beaucoup de données structurées, on peut arrêter
+                    if len(entries) > 50:
+                        break
             except Exception as e:
-                logger.warning("Extractor échoué", extra={"name": extractor.__name__, "error": str(e)})
+                logger.warning(f"Erreur {extractor.__name__}: {e}")
                 continue
 
         return self._deduplicate_entries(entries)
+
+    def _convert_structured_to_entry(self, structured_item: dict, category: str, config: dict, source_url: str) -> Optional[dict]:
+        """Convertit un item structuré au format entry standard"""
+        
+        name = structured_item.get('name')
+        if not name or len(name.strip()) < 3:
+            return None
+        
+        # Conversion au format entry standard
+        entry = {
+            'name': name.strip(),
+            'category': category,
+            'description': structured_item.get('description', ''),
+            'website': structured_item.get('website'),
+            'email': structured_item.get('email'),
+            'phone': structured_item.get('phone'), 
+            'city': self._extract_city_from_address(structured_item.get('address')),
+            'country': config.get('country'),
+            'language': config.get('language'),
+            'source_url': source_url,
+            'profession': config.get('profession'),
+            'scraped_at': datetime.now().isoformat(),
+            
+            # Champs étendus depuis données structurées
+            'facebook': structured_item.get('facebook'),
+            'linkedin': structured_item.get('linkedin'),
+            'instagram': structured_item.get('instagram'),
+            'twitter': structured_item.get('twitter'),
+            'address': structured_item.get('address'),
+            'business_type': structured_item.get('business_type'),
+            'opening_hours': structured_item.get('opening_hours'),
+            'rating': structured_item.get('rating'),
+            
+            # Métadonnées
+            'extraction_method': 'structured_data',
+            'schema_type': structured_item.get('schema_type'),
+            'quality_score': structured_item.get('quality_score', 7)  # Données structurées = qualité haute
+        }
+        
+        return entry
+
+    def _extract_city_from_address(self, address: Optional[str]) -> Optional[str]:
+        """Extrait la ville depuis une adresse complète"""
+        if not address:
+            return None
+        
+        # Patterns courants pour extraire la ville
+        parts = address.split(',')
+        if len(parts) >= 2:
+            # Généralement la ville est avant le code postal
+            for part in parts:
+                part = part.strip()
+                # Éviter codes postaux (nombres)
+                if part and not re.match(r'^\d+', part) and len(part) > 2:
+                    return part
+        
+        return None
 
     def _extract_from_lists(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
         """Extraction depuis listes HTML structurées"""

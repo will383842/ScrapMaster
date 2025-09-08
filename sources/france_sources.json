@@ -1,0 +1,30 @@
+[
+  {
+    "name": "Pages Jaunes France",
+    "base_url": "https://www.pagesjaunes.fr",
+    "categories": [
+      {
+        "name": "associations",
+        "url": "https://www.pagesjaunes.fr/annuaire/chercherlespros?quoiqui=association"
+      },
+      {
+        "name": "avocats",
+        "url": "https://www.pagesjaunes.fr/annuaire/chercherlespros?quoiqui=avocat"
+      },
+      {
+        "name": "traducteurs",
+        "url": "https://www.pagesjaunes.fr/annuaire/chercherlespros?quoiqui=traducteur"
+      }
+    ]
+  },
+  {
+    "name": "Annuaire Service Public",
+    "base_url": "https://lannuaire.service-public.fr",
+    "categories": [
+      {
+        "name": "associations",
+        "url": "https://lannuaire.service-public.fr/navigation/associations"
+      }
+    ]
+  }
+]

@@ -1,5 +1,5 @@
 import re, unicodedata, urllib.parse
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Any
 from urllib.parse import urljoin  # pour find_contact_like_links
 
 # Optional deps (graceful fallback)
@@ -309,3 +309,242 @@ def find_contact_like_links(html: str, base_url: str) -> list:
     except Exception:
         pass
     return sorted(links)
+
+
+# ===== EXTRACTION AVANCÉE DE CONTACTS =====
+
+def extract_all_contact_methods(text: str) -> Dict[str, List[str]]:
+    """Extraction complète de tous les moyens de contact"""
+    if not text:
+        return {}
+    
+    # Nettoyage préalable
+    cleaned_text = _clean_obfuscations(text)
+    
+    contacts = {
+        'emails': extract_emails(cleaned_text),
+        'phones': extract_phones(cleaned_text),
+        'whatsapp': extract_whatsapp(cleaned_text),
+        'line_id': extract_line_id(cleaned_text),
+        'telegram': extract_telegram(cleaned_text),
+        'wechat': extract_wechat(cleaned_text),
+        'social_media': extract_socials(cleaned_text),
+        'websites': extract_websites(cleaned_text),
+        'contact_forms': extract_contact_forms(cleaned_text),
+        'physical_addresses': extract_addresses(cleaned_text),
+        'business_hours': extract_business_hours(cleaned_text),
+        'contact_persons': extract_contact_persons(cleaned_text)
+    }
+    
+    return {k: v for k, v in contacts.items() if v}
+
+def extract_websites(text: str) -> List[str]:
+    """Extraction URLs de sites web"""
+    if not text:
+        return []
+    
+    # Pattern URL plus strict
+    url_pattern = r'https?://(?:[-\w.])+(?:\.[a-zA-Z]{2,})+(?:/[^\s]*)?'
+    urls = re.findall(url_pattern, text, re.I)
+    
+    # Filtrer les URLs valides
+    valid_urls = []
+    for url in urls:
+        # Exclure images, documents, réseaux sociaux déjà gérés ailleurs
+        if not re.search(r'\.(jpg|jpeg|png|gif|pdf|doc|docx)$', url, re.I):
+            if not any(social in url.lower() for social in ['facebook.com', 'instagram.com', 'linkedin.com', 'twitter.com']):
+                valid_urls.append(url)
+    
+    return list(set(valid_urls))
+
+def extract_contact_forms(text: str) -> List[str]:
+    """Extraction de mentions de formulaires de contact"""
+    if not text:
+        return []
+    
+    form_patterns = [
+        r'contact\s+form',
+        r'formulaire\s+de\s+contact',
+        r'get\s+in\s+touch',
+        r'send\s+message',
+        r'contact\s+us\s+form'
+    ]
+    
+    forms = []
+    for pattern in form_patterns:
+        matches = re.findall(pattern, text, re.I)
+        forms.extend(matches)
+    
+    return list(set(forms))
+
+def extract_addresses(text: str) -> List[str]:
+    """Extraction d'adresses physiques"""
+    if not text:
+        return []
+    
+    # Patterns d'adresses (simplifié, peut être amélioré)
+    address_patterns = [
+        r'\d+\s+[A-Za-z\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln)[\w\s,]*',
+        r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s*,\s*\d{5}(?:-\d{4})?',  # US format
+        r'\d{5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*',  # French format
+    ]
+    
+    addresses = []
+    for pattern in address_patterns:
+        matches = re.findall(pattern, text, re.M)
+        addresses.extend(matches)
+    
+    return list(set(addresses))
+
+def extract_business_hours(text: str) -> List[str]:
+    """Extraction horaires d'ouverture"""
+    if not text:
+        return []
+    
+    # Patterns horaires
+    hours_patterns = [
+        r'(?:open|ouvert|hours|horaires)[:\s]*([^.!?]*(?:am|pm|h\d{2}|\d{1,2}:\d{2})[^.!?]*)',
+        r'(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)[:\s]*([^.!?]*(?:am|pm|h\d{2}|\d{1,2}:\d{2})[^.!?]*)',
+        r'\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}',
+        r'\d{1,2}h\d{2}\s*-\s*\d{1,2}h\d{2}'
+    ]
+    
+    hours = []
+    for pattern in hours_patterns:
+        matches = re.findall(pattern, text, re.I | re.M)
+        if not matches:
+            continue
+        # Protection cas tuple sans match
+        if isinstance(matches[0], tuple):
+            hours.extend([m for m in matches if m])
+        else:
+            hours.extend(matches)
+    
+    return list(set(hours))
+
+def extract_contact_persons(text: str) -> List[str]:
+    """Extraction noms de personnes de contact"""
+    if not text:
+        return []
+    
+    # Patterns pour identifier des personnes
+    person_patterns = [
+        r'(?:contact|responsable|manager|director|président|directeur)[:\s]*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+        r'(?:mr|mrs|ms|dr|prof|m\.|mme|mlle)\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+        r'([A-Z][a-z]+\s+[A-Z][a-z]+)(?:\s*,\s*(?:manager|director|responsable|président))',
+    ]
+    
+    persons = []
+    for pattern in person_patterns:
+        matches = re.findall(pattern, text, re.M)
+        persons.extend(matches)
+    
+    # Filtrer les noms trop courts ou génériques
+    valid_persons = []
+    generic_terms = {'contact', 'information', 'service', 'team', 'support', 'admin'}
+    
+    for person in persons:
+        if len(person.split()) >= 2:  # Au moins prénom + nom
+            if not any(term.lower() in person.lower() for term in generic_terms):
+                valid_persons.append(person.strip())
+    
+    return list(set(valid_persons))
+
+# ===== DÉTECTION DE SECTEURS D'ACTIVITÉ =====
+
+def detect_business_sector(text: str, profession: str = "") -> Dict[str, Any]:
+    """Détecte le secteur d'activité depuis le texte"""
+    if not text:
+        return {}
+    
+    text_lower = text.lower()
+    
+    # Base de secteurs avec mots-clés
+    sectors = {
+        'legal': {
+            'keywords': ['droit', 'legal', 'law', 'avocat', 'lawyer', 'tribunal', 'justice', 'contentieux'],
+            'confidence_boost': 2 if 'avocat' in profession.lower() else 0
+        },
+        'healthcare': {
+            'keywords': ['santé', 'health', 'medical', 'médical', 'docteur', 'doctor', 'clinic', 'hospital'],
+            'confidence_boost': 0
+        },
+        'technology': {
+            'keywords': ['tech', 'digital', 'informatique', 'software', 'développement', 'web', 'app'],
+            'confidence_boost': 2 if 'digital' in profession.lower() else 0
+        },
+        'hospitality': {
+            'keywords': ['hotel', 'restaurant', 'tourism', 'voyage', 'hébergement', 'food', 'cuisine'],
+            'confidence_boost': 2 if any(word in profession.lower() for word in ['restaurant', 'hotel']) else 0
+        },
+        'education': {
+            'keywords': ['education', 'école', 'school', 'formation', 'training', 'université', 'university'],
+            'confidence_boost': 0
+        },
+        'nonprofit': {
+            'keywords': ['association', 'ONG', 'NGO', 'charity', 'nonprofit', 'foundation', 'bénévole'],
+            'confidence_boost': 2 if 'association' in profession.lower() else 0
+        }
+    }
+    
+    detected_sectors = {}
+    
+    for sector, data in sectors.items():
+        score = 0
+        matched_keywords = []
+        
+        for keyword in data['keywords']:
+            if keyword in text_lower:
+                score += 1
+                matched_keywords.append(keyword)
+        
+        # Boost basé sur la profession
+        score += data['confidence_boost']
+        
+        if score > 0:
+            detected_sectors[sector] = {
+                'score': score,
+                'confidence': min(score * 10, 100),  # Score sur 100
+                'matched_keywords': matched_keywords
+            }
+    
+    return detected_sectors
+
+# ===== ENRICHISSEMENT GÉOGRAPHIQUE =====
+
+def enrich_geographic_info(text: str, country: str = "") -> Dict[str, str]:
+    """Enrichit les informations géographiques"""
+    geographic_info = {}
+    
+    # Détection de villes par pays
+    city_patterns = {
+        'thaïlande': ['bangkok', 'phuket', 'chiang mai', 'pattaya', 'krabi', 'samui', 'hua hin'],
+        'france': ['paris', 'lyon', 'marseille', 'toulouse', 'nice', 'nantes', 'strasbourg'],
+        'états-unis': ['new york', 'los angeles', 'chicago', 'houston', 'phoenix', 'philadelphia'],
+        'royaume-uni': ['london', 'manchester', 'birmingham', 'glasgow', 'liverpool', 'bristol']
+    }
+    
+    text_lower = text.lower()
+    country_lower = country.lower()
+    
+    if country_lower in city_patterns:
+        for city in city_patterns[country_lower]:
+            if city in text_lower:
+                geographic_info['detected_city'] = city.title()
+                break
+    
+    # Détection codes postaux
+    postal_patterns = {
+        'france': r'\b\d{5}\b',
+        'états-unis': r'\b\d{5}(?:-\d{4})?\b',
+        'royaume-uni': r'\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b',
+        'thaïlande': r'\b\d{5}\b'
+    }
+    
+    if country_lower in postal_patterns:
+        pattern = postal_patterns[country_lower]
+        postal_matches = re.findall(pattern, text, re.I)
+        if postal_matches:
+            geographic_info['postal_code'] = postal_matches[0]
+    
+    return geographic_info

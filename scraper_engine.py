@@ -72,6 +72,35 @@ except ImportError:
             print("⚠️ SearchScraper non disponible, aucune URL trouvée via recherche")
             return []
 
+# --- Imports utilitaires nécessaires aux enrichissements ---
+try:
+    from utils.normalize import normalize_phone_list, normalize_url
+except Exception:
+    # Fallbacks minimaux pour éviter une casse, si utils.normalize indisponible
+    def normalize_phone_list(values: List[str], default_region: str = "TH") -> List[str]:
+        cleaned = []
+        for v in values or []:
+            v2 = re.sub(r'[^+\d]', '', v or '')
+            if v2:
+                cleaned.append(v2)
+        # unicité en conservant l'ordre
+        seen, out = set(), []
+        for p in cleaned:
+            if p not in seen:
+                seen.add(p); out.append(p)
+        return out
+
+    def normalize_url(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        u = str(url).strip()
+        if not u:
+            return None
+        if not u.startswith(("http://", "https://")):
+            if u.startswith("www.") or "." in u:
+                u = "https://" + u.lstrip("/")
+        return u
+
 # ---------------------------------------------------------------------
 # Helper cache pour charger/valider les sources par pays
 # ---------------------------------------------------------------------
@@ -201,88 +230,151 @@ class ScrapingEngine:
         print(f"🔧 {len(self.scrapers)} scrapers chargés")
 
     # ---------------------------------------------------------------------
-    # ORCHESTRATION "SEARCH → GENERIC"
+    # ORCHESTRATION AVANCÉE (Étape 5.1)
     # ---------------------------------------------------------------------
     def run_scraping(self, project):
         """
-        Orchestration principale.
-        1) Normalise le projet (tuple/dict/Row) -> dict project_cfg
-        2) Lance une recherche auto (SearchScraper) pour collecter des URLs cibles
-        3) Construit des sources "consommables" par le GenericScraper
-        4) Fusionne avec d'éventuels seeds existants + sources pays
-        5) Exécute le GenericScraper
-        6) Valide et renvoie les résultats
+        Orchestration principale AVANCÉE avec recherche sémantique et enrichissement multi-sources
         """
-        # --- Normalisation du format project ---
+        start_time = time.time()
+        
+        # Normalisation du projet (code existant)
         project_cfg = self._normalize_project_config(project)
-
+        
         # Si sources au format str -> JSON
         if isinstance(project_cfg.get("sources"), str):
             try:
                 project_cfg["sources"] = json.loads(project_cfg["sources"])
             except Exception:
                 project_cfg["sources"] = []
-
-        # --- Lecture des paramètres ---
+        
+        # Paramètres
         profession = (project_cfg.get("profession") or "").strip()
-        country    = (project_cfg.get("country") or "").strip()
-        language   = (project_cfg.get("language") or "en").strip()
-
-        # Récupération des keywords éventuels (depuis sources si dict)
+        country = (project_cfg.get("country") or "").strip()
+        language = (project_cfg.get("language") or "en").strip()
+        
+        # Récupération keywords et expansion sémantique
         keywords = ""
         srcs = project_cfg.get("sources")
         if isinstance(srcs, dict):
             keywords = (srcs.get("keywords") or "").strip()
-
-        print(f"🚀 Début scraping: {project_cfg.get('name')}")
+        
+        print(f"🚀 Début scraping AVANCÉ: {project_cfg.get('name')}")
         print(f"📊 Métier: {profession} | Pays: {country} | Langue: {language}")
-
-        # --- 1) Recherche automatique → URLs candidates ---
+        print(f"🔍 Mots-clés: {keywords}")
+        
+        # --- 1) RECHERCHE SÉMANTIQUE AVANCÉE ---
         try:
-            found_urls = self.searcher.search(profession, country, language, extra_keywords=keywords) or []
+            # Import du SearchScraper amélioré
+            from scrapers.search_scraper import SearchScraper
+            searcher = SearchScraper()
+            
+            found_urls = searcher.search(profession, country, language, extra_keywords=keywords) or []
+            print(f"🔍 Recherche sémantique: {len(found_urls)} URLs trouvées")
+            
         except Exception as e:
-            print(f"⚠️ SearchScraper erreur: {e}")
+            print(f"⚠️ Erreur recherche sémantique: {e}")
             found_urls = []
-
-        # --- 2) Construire des sources "consommables" par le GenericScraper ---
+        
+        # --- 2) CONSTRUCTION SOURCES MULTI-NIVEAUX ---
         search_sources = [{
-            "name": f"Search:{profession}-{country}-{language}",
+            "name": f"SemanticSearch:{profession}-{country}-{language}",
             "categories": [
-                {"name": "search", "url": u if u.endswith("/") else u + "/"}
-                for u in found_urls[:50]
+                {"name": "semantic_search", "url": u if u.endswith("/") else u + "/"}
+                for u in found_urls[:30]  # Augmenté à 30 pour plus de données
             ]
-        }]
-
-        # --- 3) Fusionner avec d'éventuelles sources existantes (seeds) + sources pays ---
+        }] if found_urls else []
+        
+        # Sources existantes (seeds + pays)
         seeds: List[dict] = []
         if isinstance(srcs, list):
             seeds = srcs
         elif isinstance(srcs, dict) and srcs.get("seed_sources"):
             seeds = srcs["seed_sources"]
-
-        # pays -> sources validées (cache)
-        validated_country_sources = _load_sources_cached(country) or []
-
-        # Priorité : seeds + sources pays validées + search_sources
-        sources = (seeds or []) + (validated_country_sources or [])
-        sources += search_sources
-
-        # --- 4) Lancer le GenericScraper sur ces sources ---
+        
+        # Sources pays validées (avec profession pour spécialisation)
+        try:
+            validated_country_sources = _load_sources_cached(country, profession) or []  # type: ignore[arg-type]
+        except Exception:
+            validated_country_sources = _load_sources_cached(country) or []
+        
+        # Fusion sources avec priorité
+        all_sources = []
+        all_sources.extend(search_sources)      # Priorité 1: Recherche sémantique
+        all_sources.extend(seeds or [])         # Priorité 2: Seeds utilisateur
+        all_sources.extend(validated_country_sources or [])  # Priorité 3: Sources pays
+        
+        print(f"📂 Sources totales: {len(all_sources)} ({len(search_sources)} sémantiques + {len(seeds)} seeds + {len(validated_country_sources)} pays)")
+        
+        # --- 3) SCRAPING AVEC EXTRACTION STRUCTURÉE ---
         cfg = dict(project_cfg)
-        cfg["sources"] = sources
+        cfg["sources"] = all_sources
         cfg["keep_incomplete"] = True
-
+        cfg["enable_structured_extraction"] = True  # Flag pour extraction avancée
+        
         try:
             raw_results = self.generic.scrape(cfg) or []
-            print(f"✅ Scraping terminé (generic): {len(raw_results)} résultats")
+            print(f"✅ Scraping brut terminé: {len(raw_results)} résultats")
         except Exception as e:
-            print(f"❌ Erreur GenericScraper: {e}")
+            print(f"❌ Erreur scraping: {e}")
             raw_results = []
-
-        # --- 5) Validation / nettoyage stricts ---
-        validated_results = self.validate_results(raw_results, cfg)
-        print(f"🎯 Résultats validés: {len(validated_results)} résultats")
-
+        
+        # --- 4) ENRICHISSEMENT MULTI-SOURCES ---
+        enriched_results = []
+        
+        if raw_results:
+            print(f"🔄 Début enrichissement multi-sources...")
+            
+            try:
+                from enrichers.multi_source_enricher import multi_enricher
+                
+                for i, result in enumerate(raw_results):
+                    try:
+                        enriched_result = multi_enricher.enrich_entry_complete(result, cfg)
+                        enriched_results.append(enriched_result)
+                        
+                        # Progress indication
+                        if (i + 1) % 10 == 0:
+                            print(f"🔄 Enrichissement: {i + 1}/{len(raw_results)} traités")
+                        
+                        # Délai pour éviter surcharge
+                        if i % 5 == 0:
+                            time.sleep(0.5)
+                            
+                    except Exception as e:
+                        print(f"⚠️ Erreur enrichissement résultat {i}: {e}")
+                        enriched_results.append(result)  # Garder non enrichi
+                
+                print(f"✅ Enrichissement terminé: {len(enriched_results)} résultats enrichis")
+                
+            except ImportError:
+                print("⚠️ Enrichisseur non disponible, utilisation données brutes")
+                enriched_results = raw_results
+            except Exception as e:
+                print(f"⚠️ Erreur enrichissement global: {e}")
+                enriched_results = raw_results
+        else:
+            enriched_results = raw_results
+        
+        # --- 5) VALIDATION ET NETTOYAGE FINAL ---
+        validated_results = self.validate_results(enriched_results, cfg)
+        
+        # --- 6) MÉTRIQUES FINALES ---
+        duration = time.time() - start_time
+        
+        # Calcul métriques qualité
+        high_quality_results = [r for r in validated_results if r.get('quality_score', 0) >= 7]
+        enriched_count = len([r for r in validated_results if r.get('enrichment_quality', 0) > 0])
+        
+        print(f"⏱️ Scraping total terminé en {duration:.2f}s")
+        print(f"📊 Résultats: {len(raw_results)} bruts → {len(enriched_results)} enrichis → {len(validated_results)} validés")
+        print(f"🌟 Qualité: {len(high_quality_results)} résultats haute qualité")
+        print(f"🔍 Enrichissement: {enriched_count} résultats enrichis")
+        
+        if validated_results:
+            avg_quality = sum(r.get('quality_score', 0) for r in validated_results) / len(validated_results)
+            print(f"📈 Score qualité moyen: {avg_quality:.1f}/10")
+        
         return validated_results
 
     # ---------------------------------------------------------------------
@@ -378,52 +470,45 @@ class ScrapingEngine:
             ]
 
     # ---------------------------------------------------------------------
-    # Validation / nettoyage des résultats (STRICT + LOGGING)
+    # Validation / nettoyage des résultats — VERSION PLUS PERMISSIVE
     # ---------------------------------------------------------------------
     def validate_results(self, results: List[dict], config: dict) -> List[dict]:
-        """Valide et nettoie les résultats avec reporting détaillé"""
+        """
+        Validation plus permissive :
+        - Accepte si AU MOINS un contact (site/email/tel) OU une petite description (>=10 chars)
+        - Si keep_incomplete=True (par défaut), garde aussi les fiches incomplètes pour enrichissement
+        """
         validated: List[dict] = []
-        stats = {
-            'total_input': len(results),
-            'skipped_not_dict': 0,
-            'skipped_no_name': 0,
-            'skipped_no_contact': 0,
-            'validated': 0
-        }
+        stats = {"skipped_no_contact": 0}
 
-        for i, result in enumerate(results):
+        keep_incomplete = bool(config.get("keep_incomplete", True))
+
+        for result in results or []:
             if not isinstance(result, dict):
-                stats['skipped_not_dict'] += 1
-                logger.warning(f"Résultat #{i} ignoré: pas un dict", extra={"result_type": str(type(result))})
                 continue
 
+            # Toujours exiger un nom minimal
             name = (result.get('name') or '').strip()
             if not name or len(name) < 2:
-                stats['skipped_no_name'] += 1
-                logger.warning(f"Résultat #{i} ignoré: nom invalide", extra={"name": name})
                 continue
 
-            # Validation contact obligatoire
-            has_contact = any([
-                result.get('website'),
-                result.get('email'),
-                result.get('phone'),
-                result.get('facebook'),
-                result.get('whatsapp'),
-                (result.get('description') or '') and len(result.get('description', '')) > 50
-            ])
+            contact_fields = [
+                "website", "email", "phone",
+                "email_enriched", "phone_enriched", "emails_from_sources", "phones_from_sources"
+            ]
+            has_contact = any(result.get(f) for f in contact_fields)
+            description = (result.get("description") or "").strip()
+            has_description = len(description) >= 10
 
-            if not has_contact:
-                stats['skipped_no_contact'] += 1
-                logger.warning(f"Résultat #{i} ignoré: aucun contact", extra={"name": name})
+            if not has_contact and not has_description and not keep_incomplete:
+                stats["skipped_no_contact"] += 1
                 continue
 
-            # Nettoyage et normalisation
-            cleaned = self._clean_result(result, config)
+            # Nettoyage final (on garde ton pipeline existant)
+            cleaned = self._clean_result_advanced(result, config)
             validated.append(cleaned)
-            stats['validated'] += 1
 
-        logger.info("Validation résultats terminée", extra=stats)
+        self._last_validation_stats = stats
         return validated
 
     # --- Nettoyage unifié (utilise les helpers existants) ---
@@ -489,6 +574,70 @@ class ScrapingEngine:
         }
         return cleaned
 
+    # --- Nettoyage avancé avec fusion des enrichissements ---
+    def _clean_result_advanced(self, r: dict, config: dict) -> dict:
+        """Nettoyage avancé avec gestion des enrichissements"""
+        cleaned = self._clean_result(r, config)
+
+        # Fusion enrichissements emails
+        all_emails = set()
+        for email_field in ['email', 'email_enriched', 'emails_from_sources']:
+            email_value = r.get(email_field)
+            if email_value:
+                emails = [e.strip() for e in str(email_value).split(';') if e.strip()]
+                all_emails.update(self.extract_emails_from_text('; '.join(emails)))
+
+        if all_emails:
+            cleaned['email'] = '; '.join(sorted(all_emails)[:3])  # Max 3 emails
+
+        # Fusion enrichissements téléphones
+        all_phones = set()
+        for phone_field in ['phone', 'phone_enriched', 'phones_from_sources']:
+            phone_value = r.get(phone_field)
+            if phone_value:
+                phones = [p.strip() for p in str(phone_value).split(';') if p.strip()]
+                region = self.country_to_region(config.get('country'))
+                normalized_phones = normalize_phone_list(phones, default_region=region)
+                all_phones.update(normalized_phones)
+
+        if all_phones:
+            cleaned['phone'] = '; '.join(sorted(all_phones)[:3])  # Max 3 téléphones
+
+        # Réseaux sociaux enrichis
+        social_platforms = ['facebook', 'linkedin', 'instagram', 'twitter']
+        for platform in social_platforms:
+            enriched_field = f'{platform}_enriched'
+            sources_field = f'{platform}_from_sources'
+            value = r.get(enriched_field) or r.get(sources_field) or r.get(platform)
+            if value:
+                cleaned[platform] = normalize_url(value)
+
+        # Métadonnées enrichissement
+        cleaned['enrichment_quality'] = r.get('enrichment_quality', 0)
+        cleaned['detected_sectors'] = r.get('detected_sectors', {})
+        cleaned['extraction_method'] = r.get('extraction_method', 'standard')
+
+        # Informations géographiques enrichies
+        if r.get('detected_city'):
+            cleaned['city'] = r['detected_city']
+        if r.get('postal_code'):
+            cleaned['postal_code'] = r['postal_code']
+        if r.get('address_enriched'):
+            cleaned['address'] = r['address_enriched']
+
+        # Données business
+        if r.get('business_hours'):
+            cleaned['business_hours'] = r['business_hours']
+        if r.get('contact_person'):
+            cleaned['contact_person'] = r['contact_person']
+
+        return cleaned
+
+    def extract_emails_from_text(self, text: str) -> List[str]:
+        """Helper pour extraction emails depuis texte"""
+        from utils.normalize import extract_emails
+        return extract_emails(text)
+
     # ---------------------------------------------------------------------
     # Helpers de nettoyage existants
     # ---------------------------------------------------------------------
@@ -547,6 +696,24 @@ class ScrapingEngine:
             (result.get('description') and len(result.get('description')) > 50)
         )
         return has_contact
+
+    # --- Mapping léger pays -> région pour la normalisation des téléphones (utile au moteur) ---
+    def country_to_region(self, country: Optional[str]) -> str:
+        """Convertit un nom de pays en code région (E.164)"""
+        mapping = {
+            'Thaïlande': 'TH', 'Thailand': 'TH',
+            'France': 'FR',
+            'États-Unis': 'US', 'United States': 'US', 'USA': 'US',
+            'Royaume-Uni': 'GB', 'United Kingdom': 'GB', 'UK': 'GB',
+            'Allemagne': 'DE', 'Germany': 'DE',
+            'Espagne': 'ES', 'Spain': 'ES',
+            'Italie': 'IT', 'Italy': 'IT',
+            'Russie': 'RU', 'Russia': 'RU',
+            'Chine': 'CN', 'China': 'CN',
+            'Japon': 'JP', 'Japan': 'JP'
+        }
+        c = (country or '').strip()
+        return mapping.get(c, 'TH')
 
 
 # ---------------------------------------------------------------------

@@ -64,30 +64,138 @@ class SearchScraper:
     # ---------------- Core API ----------------
 
     def search(self, profession: str, country: str, language: str, extra_keywords: str = "") -> list:
-        """Recherche sécurisée avec validation et échappement"""
-        # Validation stricte des entrées
+        """Recherche sémantique avancée avec expansion de mots-clés"""
+        
+        # Import du moteur sémantique
+        try:
+            from config.semantic_database import semantic_db
+        except ImportError:
+            logger.warning("Base sémantique non disponible, recherche basique")
+            return self._basic_search(profession, country, language, extra_keywords)
+        
+        # Validation et nettoyage
         profession = self._sanitize_search_term(profession)
         country = self._sanitize_search_term(country)
-        language = self._sanitize_search_term(language)
-        extra_keywords = self._sanitize_search_term(extra_keywords)
-
+        
         if not profession or not country:
-            logger.warning("Paramètres recherche insuffisants",
-                           extra={"profession": profession, "country": country})
+            logger.warning("Paramètres recherche insuffisants")
             return []
+        
+        # Génération des variations sémantiques
+        search_variations = semantic_db.generate_search_variations(
+            profession, country, extra_keywords
+        )
+        
+        logger.info(f"🧠 Recherche sémantique: {len(search_variations)} variations générées")
+        
+        # Construction des requêtes enrichies
+        enriched_queries = []
+        
+        # Requêtes de base (comme avant)
+        contact_words = _kw_bundle(language)
+        base_templates = [
+            "{variation}",
+            "{variation} email contact",
+            "{variation} directory",
+            "{variation} professional directory",
+            "{variation} {contact_word1} {contact_word2}",
+            "{variation} site:*.org",
+            "{variation} site:*.gov",
+            "{variation} linkedin",
+            "{variation} facebook page"
+        ]
+        
+        # Générer requêtes pour chaque variation
+        for variation in search_variations[:10]:  # Limiter à 10 variations principales
+            for template in base_templates[:6]:  # Limiter templates
+                try:
+                    query = template.format(
+                        variation=variation,
+                        contact_word1=contact_words[0] if contact_words else "contact",
+                        contact_word2=contact_words[1] if len(contact_words) > 1 else "email"
+                    )
+                    
+                    if 5 <= len(query) <= 150:  # Validation longueur
+                        enriched_queries.append(query)
+                        
+                except Exception:
+                    continue
+        
+        # Déduplication intelligente
+        unique_queries = []
+        seen_cores = set()
+        
+        for query in enriched_queries:
+            # Core = mots principaux sans stop words
+            core = " ".join([w for w in query.lower().split() 
+                            if w not in {"the", "and", "or", "in", "at", "on", "site:", "email", "contact"}])
+            if core not in seen_cores:
+                seen_cores.add(core)
+                unique_queries.append(query)
+        
+        # Limitation finale
+        final_queries = unique_queries[:15]  # Max 15 requêtes
+        
+        logger.info(f"🎯 {len(final_queries)} requêtes finales sélectionnées")
+        
+        # Exécution recherche
+        return self._execute_enhanced_searches(final_queries)
 
-        # Construction sécurisée
+    def _execute_enhanced_searches(self, queries: List[str]) -> List[str]:
+        """Exécute les recherches avec stratégie optimisée"""
+        all_urls: List[str] = []
+        
+        for i, query in enumerate(queries):
+            try:
+                logger.info(f"🔍 Requête {i+1}/{len(queries)}: {query[:50]}...")
+                
+                # Alterner moteurs pour diversifier
+                if i % 2 == 0:
+                    urls = self._ddg_query_safe(query, max_pages=2)
+                else:
+                    urls = self._bing_query_safe(query, max_pages=2)
+                
+                all_urls.extend(urls)
+                
+                # Rate limiting adaptatif
+                base_delay = self.delay_s
+                if i < 5:  # Premières requêtes plus rapides
+                    delay = base_delay * 0.7
+                elif len(all_urls) > 50:  # Si beaucoup de résultats, ralentir
+                    delay = base_delay * 1.5
+                else:
+                    delay = base_delay
+                
+                time.sleep(delay + random.uniform(0.2, 0.8))
+                
+                # Arrêt anticipé si suffisamment de résultats
+                if len(all_urls) > 100:
+                    logger.info(f"🎯 Arrêt anticipé: {len(all_urls)} URLs collectées")
+                    break
+                    
+            except Exception as e:
+                logger.warning(f"Erreur requête '{query[:30]}': {str(e)[:100]}")
+                continue
+        
+        # Nettoyage et validation finale
+        cleaned_urls = self._clean_and_validate_urls(all_urls)
+        
+        logger.info(f"✅ Recherche terminée: {len(cleaned_urls)} URLs valides sur {len(all_urls)} brutes")
+        
+        return cleaned_urls
+
+    def _basic_search(self, profession: str, country: str, language: str, extra_keywords: str = "") -> list:
+        """Recherche basique en fallback (code original)"""
+        # Garder le code original de search() comme fallback
         contact_words = _kw_bundle(language)
         query_templates = [
             "{profession} {country}",
             "{profession} {country} {contact_word1} {contact_word2}",
             "{profession} {country} email contact",
             "{profession} {country} directory association",
-            "{profession} {country} {contact_word1} site:*.org",
-            "{profession} {country} {contact_word1} site:*.gov",
         ]
-
-        queries: List[str] = []
+        
+        queries = []
         for template in query_templates:
             try:
                 q = template.format(
@@ -96,20 +204,15 @@ class SearchScraper:
                     contact_word1=contact_words[0] if contact_words else "contact",
                     contact_word2=contact_words[1] if len(contact_words) > 1 else "email"
                 )
-                # Ajout mots-clés extra sécurisés
                 if extra_keywords:
                     q = f"{q} {extra_keywords}"
-
-                # Validation finale longueur
+                
                 if 5 <= len(q) <= 200:
                     queries.append(q)
-            except (KeyError, IndexError) as e:
-                logger.warning("Erreur template query", extra={"template": template, "error": str(e)})
+            except Exception:
                 continue
-
-        # Exécution avec rate limiting & retry
-        urls = self._execute_searches(queries)
-        return urls[:200]
+        
+        return self._execute_searches(queries)  # Méthode existante
 
     # ---------------- Validation & orchestration ----------------
 

@@ -59,34 +59,46 @@ else:
     print("⚠️ Blueprint Studio non disponible")
 
 # -----------------------------------------------------------------------------
-# SYSTÈME DE STATUT TEMPS RÉEL
+# SYSTÈME DE STATUT TEMPS RÉEL (mémoire)
 # -----------------------------------------------------------------------------
 project_status = {}
 status_lock = threading.Lock()
 
 def update_project_progress(project_id, progress, step, message=None):
-    """Met à jour le statut d'un projet en cours"""
+    """(EXISTANT) Met à jour le statut d'un projet en cours pour l'endpoint /start_scraping."""
     with status_lock:
         if project_id not in project_status:
             project_status[project_id] = {
                 'progress': 0,
-                'current_step': 'Initialisation',
+                'current_step': 'Initialisation…',
                 'log_messages': [],
-                'started_at': datetime.now().isoformat()
+                'started_at': datetime.now()
             }
-        
-        project_status[project_id]['progress'] = progress
+        project_status[project_id]['progress'] = int(progress)
         project_status[project_id]['current_step'] = step
-        
         if message:
             project_status[project_id]['log_messages'].append({
                 'timestamp': datetime.now().isoformat(),
                 'message': message
             })
-            
-            # Garder seulement les 50 derniers messages
             if len(project_status[project_id]['log_messages']) > 50:
                 project_status[project_id]['log_messages'] = project_status[project_id]['log_messages'][-50:]
+
+# ✅ Wrapper demandé (cap à 99, message optionnel)
+def update_project_live(pid: int, progress: int = None, step: str = None, message: str | None = None):
+    with status_lock:
+        st = project_status.get(pid) or {}
+        if "started_at" not in st:
+            st["started_at"] = datetime.now()
+        if progress is not None:
+            st["progress"] = max(0, min(99, int(progress)))
+        if step is not None:
+            st["current_step"] = step
+        if message:
+            logs = st.get("log_messages", [])
+            logs.append({"timestamp": datetime.now().isoformat(), "message": message})
+            st["log_messages"] = logs[-50:]
+        project_status[pid] = st
 
 # -----------------------------------------------------------------------------
 # Helpers sûrs
@@ -95,7 +107,7 @@ def add_column_if_missing(cursor, table: str, column: str, coltype: str):
     """
     Ajoute une colonne si manquante avec whitelist STRICTE (évite SQL injection).
     """
-    # Whitelist stricte - AUCUNE exception
+    # Whitelist stricte
     SAFE_TABLES = frozenset(['projects', 'results', 'professions', 'countries', 'languages'])
     SAFE_COLUMNS = frozenset([
         # projets
@@ -112,12 +124,10 @@ def add_column_if_missing(cursor, table: str, column: str, coltype: str):
     if column not in SAFE_COLUMNS:
         raise ValueError(f"Colonne interdite: {column}")
 
-    # Maintenant sûr d'utiliser f-string
     cursor.execute(f"PRAGMA table_info({table})")
     cols = [r[1] for r in cursor.fetchall()]
     if column not in cols:
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-
 
 def insert_result_safe(cursor, project_id: int, result_data: dict):
     """
@@ -158,7 +168,6 @@ def insert_result_safe(cursor, project_id: int, result_data: dict):
         INSERT INTO results ({col_names}, scraped_at)
         VALUES ({placeholders}, CURRENT_TIMESTAMP)
     """, tuple(columns.values()))
-
 
 class ScrapMasterApp:
     def __init__(self):
@@ -216,7 +225,6 @@ class ScrapMasterApp:
             ''')
 
             # --- Migration douce : ajouter des colonnes si manquantes (anti-SQLi) ---
-            # ►► Colonnes "compteurs & timings" au niveau PROJETS (historique)
             add_column_if_missing(cursor, "projects", "emails_count",   "INTEGER DEFAULT 0")
             add_column_if_missing(cursor, "projects", "phones_count",   "INTEGER DEFAULT 0")
             add_column_if_missing(cursor, "projects", "whatsapp_count", "INTEGER DEFAULT 0")
@@ -226,9 +234,8 @@ class ScrapMasterApp:
             add_column_if_missing(cursor, "projects", "started_at",     "TIMESTAMP")
             add_column_if_missing(cursor, "projects", "finished_at",    "TIMESTAMP")
             add_column_if_missing(cursor, "projects", "run_ms",         "INTEGER")
-            # ◄◄
 
-            # Colonnes étendues pour stocker plus d'infos de contact (RESULTS)
+            # Colonnes étendues pour results
             add_column_if_missing(cursor, "results", "facebook", "TEXT")
             add_column_if_missing(cursor, "results", "instagram", "TEXT")
             add_column_if_missing(cursor, "results", "linkedin", "TEXT")
@@ -291,7 +298,6 @@ class ScrapMasterApp:
     def insert_default_data(self, cursor):
         """Insère les données par défaut"""
         try:
-            # Métiers par défaut
             professions = [
                 ('YouTubeurs', 'Créateurs de contenu YouTube', 'youtube_scraper'),
                 ('Avocats', 'Professionnels du droit', 'lawyer_scraper'),
@@ -307,7 +313,6 @@ class ScrapMasterApp:
                     'INSERT OR IGNORE INTO professions (name, description, scraper_template) VALUES (?, ?, ?)', prof
                 )
 
-            # Pays/zones par défaut
             countries = [
                 ('Thaïlande', 'Royaume de Thaïlande', 'thailand_sources.json'),
                 ('France', 'République française', 'france_sources.json'),
@@ -323,7 +328,6 @@ class ScrapMasterApp:
                     'INSERT OR IGNORE INTO countries (name, description, sources) VALUES (?, ?, ?)', country
                 )
 
-            # Langues par défaut
             languages = [
                 ('fr', 'Français', 'Langue française'),
                 ('en', 'Anglais', 'Langue anglaise'),
@@ -349,9 +353,125 @@ class ScrapMasterApp:
         except Exception as e:
             print(f"⚠️ Erreur insertion données par défaut: {e}")
 
-
 # Instance globale
 scrap_master = ScrapMasterApp()
+
+# -----------------------------------------------------------------------------
+# NOUVELLE IMPLÉMENTATION : lancer le scraping DIRECTEMENT (pas d’auto-appel HTTP)
+# -----------------------------------------------------------------------------
+def real_start_scraping(project_id: int):
+    """Exécute le moteur de scraping et finalise la base, quoi qu'il arrive."""
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        # Marquer "running" dès le départ
+        cursor.execute(
+            'UPDATE projects SET status = "running", started_at = ? WHERE id = ?',
+            (datetime.now(), project_id)
+        )
+        conn.commit()
+        update_project_live(project_id, 5, "Initialisation…", "Projet marqué comme en cours")
+
+        # Charger la config du projet
+        cursor.execute('SELECT * FROM projects WHERE id = ?', (project_id,))
+        row = cursor.fetchone()
+        if not row:
+            update_project_live(project_id, 99, "Projet introuvable")
+            return
+
+        # Construire la config attendue par le moteur
+        project_cfg = dict(row)
+        try:
+            project_cfg["sources"] = json.loads(project_cfg.get("sources") or "[]")
+        except Exception:
+            project_cfg["sources"] = []
+        project_cfg["keep_incomplete"] = True
+
+        update_project_live(project_id, 15, "Collecte des sources…")
+
+        # Lancer le scraping
+        try:
+            update_project_live(project_id, 30, "Scraping en cours…", "Lancement du moteur")
+            results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
+        except Exception:
+            traceback.print_exc()
+            results = []
+
+        update_project_live(project_id, 70, "Sauvegarde des résultats…", f"{len(results)} items à insérer")
+
+        # Sauvegarder les résultats
+        saved = 0
+        for i, r in enumerate(results):
+            try:
+                insert_result_safe(cursor, project_id, r)
+                saved += 1
+                if saved % 10 == 0 and len(results) > 0:
+                    p = 70 + int((saved / max(1, len(results))) * 20)
+                    update_project_live(project_id, p, "Sauvegarde…", f"{saved}/{len(results)} enregistrés")
+            except Exception:
+                traceback.print_exc()
+                continue
+        conn.commit()
+
+        # Statistiques (blindées)
+        update_project_live(project_id, 95, "Finalisation…", "Calcul des statistiques")
+        try:
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN email IS NOT NULL AND email != '' THEN 1 ELSE 0 END) as emails,
+                    SUM(CASE WHEN phone IS NOT NULL AND phone != '' THEN 1 ELSE 0 END) as phones,
+                    SUM(CASE WHEN whatsapp IS NOT NULL AND whatsapp != '' THEN 1 ELSE 0 END) as whatsapp
+                FROM results WHERE project_id = ?
+            """, (project_id,))
+            stats = cursor.fetchone() or (0, 0, 0, 0)
+            # sqlite3.Row -> peut être indexé
+            total = stats[0] if isinstance(stats, tuple) else stats["total"]
+            emails = stats[1] if isinstance(stats, tuple) else stats["emails"]
+            phones = stats[2] if isinstance(stats, tuple) else stats["phones"]
+            whatsapp = stats[3] if isinstance(stats, tuple) else stats["whatsapp"]
+        except Exception:
+            traceback.print_exc()
+            total, emails, phones, whatsapp = 0, 0, 0, 0
+
+        # Marquer terminé (PAS de colonne progress ici)
+        cursor.execute(
+            '''UPDATE projects SET 
+                   status = "completed", 
+                   total_results = ?, 
+                   emails_count = ?,
+                   phones_count = ?,
+                   whatsapp_count = ?,
+                   finished_at = ?
+               WHERE id = ?''',
+            (total, emails, phones, whatsapp, datetime.now(), project_id)
+        )
+        conn.commit()
+        update_project_live(project_id, 99, "Finalisation…", f"✅ Terminé: {total} résultats")
+
+    except Exception as e:
+        traceback.print_exc()
+        # En cas d'erreur : marquer error mais essayer de pousser à la fin
+        try:
+            cursor.execute('UPDATE projects SET status = "error", finished_at = ? WHERE id = ?', 
+                           (datetime.now(), project_id))
+            conn.commit()
+        except Exception:
+            pass
+        update_project_live(project_id, 0, "Erreur", str(e))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        # Nettoyage différé du live status
+        def cleanup_status():
+            time.sleep(300)
+            with status_lock:
+                if project_id in project_status:
+                    del project_status[project_id]
+        threading.Thread(target=cleanup_status, daemon=True).start()
 
 # -----------------------------------------------------------------------------
 # ROUTES PRINCIPALES (NOUVELLE INTERFACE UNIFIÉE)
@@ -403,50 +523,13 @@ def quick_search():
         conn.commit()
         conn.close()
         
-        # Lancer automatiquement le scraping
-        def auto_start_scraping():
-            import time
-            time.sleep(1)
-            try:
-                conn = sqlite3.connect(DATABASE)
-                cursor = conn.cursor()
-                cursor.execute(
-                    'UPDATE projects SET status = "running", started_at = ? WHERE id = ?',
-                    (datetime.now(), project_id)
-                )
-                conn.commit()
-                
-                # Simulation de travail (remplacez par votre vraie logique)
-                time.sleep(30)
-                
-                # Simuler des résultats
-                import random
-                total_results = random.randint(20, 150)
-                emails_count = random.randint(10, int(total_results * 0.7))
-                phones_count = random.randint(5, int(total_results * 0.5))
-                
-                cursor.execute('''
-                UPDATE projects SET 
-                    status = "completed",
-                    total_results = ?,
-                    emails_count = ?,
-                    phones_count = ?,
-                    finished_at = ?
-                WHERE id = ?
-                ''', (total_results, emails_count, phones_count, datetime.now(), project_id))
-                
-                conn.commit()
-                conn.close()
-                
-            except Exception as e:
-                print(f"Erreur auto-scraping: {e}")
-        
-        threading.Thread(target=auto_start_scraping, daemon=True).start()
+        # ✅ Lancer immédiatement le scraping réel dans un thread Python
+        threading.Thread(target=real_start_scraping, args=(project_id,), daemon=True).start()
         
         return jsonify({
             'success': True, 
             'project_id': project_id,
-            'message': 'Recherche lancée automatiquement'
+            'message': 'Recherche lancée avec le moteur réel'
         })
         
     except Exception as e:
@@ -454,58 +537,55 @@ def quick_search():
 
 @app.route('/api/search_status/<int:project_id>')
 def search_status(project_id):
-    """Statut simplifié pour l'interface unifiée"""
+    """Statut pour l'interface unifiée — plus de cap à 90 %, on utilise le live + fallback 45s→99%."""
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
-        cursor.execute('''
-        SELECT status, total_results, emails_count, phones_count, 
-               started_at, finished_at, name
-        FROM projects 
-        WHERE id = ?
-        ''', (project_id,))
-        
-        result = cursor.fetchone()
-        if not result:
-            return jsonify({'error': 'Project not found'}), 404
-        
-        status, total_results, emails_count, phones_count, started_at, finished_at, name = result
-        
-        # Calculer la progression estimée
-        progress = 0
-        current_step = "En attente"
-        
-        if status == "running":
-            if started_at:
-                try:
-                    start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00') if 'Z' in started_at else started_at)
-                except:
-                    start_time = datetime.now()
-                elapsed = (datetime.now() - start_time).total_seconds()
-                progress = min(90, elapsed / 30 * 100)
-                
-                if progress < 20:
-                    current_step = "Recherche des sources..."
-                elif progress < 40:
-                    current_step = "Analyse des annuaires..."
-                elif progress < 60:
-                    current_step = "Extraction des contacts..."
-                elif progress < 80:
-                    current_step = "Collecte des détails..."
-                else:
-                    current_step = "Finalisation..."
-        elif status == "completed":
-            progress = 100
-            current_step = "Terminé !"
-        elif status == "error":
-            progress = 0
-            current_step = "Erreur"
-        
+        cursor.execute('SELECT status, started_at, name, total_results, emails_count, phones_count FROM projects WHERE id = ?', (project_id,))
+        row = cursor.fetchone()
         conn.close()
-        
+
+        if not row:
+            return jsonify({'error': 'Project not found'}), 404
+
+        status, started_at, name, total_results, emails_count, phones_count = row
+
+        # Terminé → 100 %
+        if status == "completed":
+            return jsonify({
+                'status': 'completed',
+                'progress': 100,
+                'current_step': 'Terminé',
+                'total_results': total_results or 0,
+                'emails_count': emails_count or 0,
+                'phones_count': phones_count or 0,
+                'name': name
+            })
+
+        # Live
+        with status_lock:
+            live = project_status.get(project_id, {})
+
+        progress = int(live.get('progress', 0))
+        current_step = live.get('current_step', 'Initialisation…')
+
+        # Fallback temporel si pas de live (ou très bas)
+        if progress < 5:
+            try:
+                if isinstance(started_at, str):
+                    # sqlite peut renvoyer str
+                    start_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00') if 'Z' in started_at else started_at)
+                else:
+                    start_dt = started_at or datetime.now()
+            except Exception:
+                start_dt = datetime.now()
+            elapsed = (datetime.now() - start_dt).total_seconds()
+            progress = min(99, int(elapsed / 45 * 100))
+            if progress >= 99:
+                current_step = "Finalisation…"
+
         return jsonify({
-            'status': status,
+            'status': 'running',
             'progress': progress,
             'current_step': current_step,
             'total_results': total_results or 0,
@@ -513,12 +593,12 @@ def search_status(project_id):
             'phones_count': phones_count or 0,
             'name': name
         })
-        
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 # -----------------------------------------------------------------------------
-# ROUTES EXISTANTES (COMPATIBILITÉ)
+# ROUTES EXISTANTES (COMPATIBILITÉ) — inchangées
 # -----------------------------------------------------------------------------
 
 @app.route('/dashboard')
@@ -684,23 +764,22 @@ def get_project_status(project_id):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# === Endpoint de compatibilité : lance un scraping avec logs (garde-le pour usage externe) ===
 @app.route('/start_scraping/<int:project_id>', methods=['POST'])
 def start_scraping(project_id):
-    """Lance le scraping d'un projet avec feedback temps réel"""
+    """Lance le scraping d'un projet avec feedback temps réel (endpoint conservé, non auto-appelé)."""
     if not scrap_master.scraping_engine:
         return jsonify({'success': False, 'error': 'Moteur de scraping non disponible'}), 500
 
     def run_scraping_with_feedback():
         conn = None
         try:
-            # Initialiser le statut
             update_project_progress(project_id, 5, "Préparation", "Initialisation du scraping...")
             
             conn = sqlite3.connect(DATABASE)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # Marquer comme en cours
             cursor.execute(
                 'UPDATE projects SET status = "running", started_at = ? WHERE id = ?',
                 (datetime.now(), project_id)
@@ -708,7 +787,6 @@ def start_scraping(project_id):
             conn.commit()
             update_project_progress(project_id, 10, "Démarrage", "Projet marqué comme en cours")
 
-            # Récupérer les infos du projet
             cursor.execute('SELECT * FROM projects WHERE id = ?', (project_id,))
             project_row = cursor.fetchone()
             if not project_row:
@@ -716,7 +794,6 @@ def start_scraping(project_id):
 
             update_project_progress(project_id, 20, "Configuration", "Configuration du projet récupérée")
 
-            # Adapter la Row en dict + décoder sources JSON
             project_cfg = dict(project_row)
             try:
                 project_cfg["sources"] = json.loads(project_cfg.get("sources") or "[]")
@@ -726,27 +803,21 @@ def start_scraping(project_id):
 
             update_project_progress(project_id, 30, "Recherche", "Lancement du moteur de scraping...")
 
-            # Lancer le scraping via le moteur
             results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
             
             update_project_progress(project_id, 70, "Traitement", f"{len(results)} résultats trouvés, sauvegarde en cours...")
 
-            # Sauvegarder les résultats
             saved_count = 0
             for i, r in enumerate(results):
                 try:
                     insert_result_safe(cursor, project_id, r)
                     saved_count += 1
-                    
-                    # Mise à jour périodique
                     if i % 10 == 0 and len(results) > 0:
                         progress = 70 + (i / len(results)) * 20
                         update_project_progress(project_id, progress, "Sauvegarde", f"{saved_count}/{len(results)} résultats sauvegardés")
-                        
                 except Exception as e:
                     print(f"⚠️ Erreur sauvegarde résultat: {e}")
 
-            # Calculer les statistiques
             update_project_progress(project_id, 95, "Finalisation", "Calcul des statistiques...")
             
             cursor.execute('''
@@ -761,7 +832,6 @@ def start_scraping(project_id):
             stats = cursor.fetchone()
             total, emails, phones, whatsapp = stats if stats else (0, 0, 0, 0)
 
-            # Mettre à jour le statut final
             cursor.execute(
                 '''UPDATE projects SET 
                    status = "completed", 
@@ -787,25 +857,21 @@ def start_scraping(project_id):
                 if conn:
                     cursor = conn.cursor()
                     cursor.execute('UPDATE projects SET status = "error", finished_at = ? WHERE id = ?', 
-                                 (datetime.now(), project_id))
+                                   (datetime.now(), project_id))
                     conn.commit()
             except Exception:
                 pass
         finally:
             if conn:
                 conn.close()
-            
-            # Nettoyer le statut après un délai
             def cleanup_status():
-                time.sleep(300)  # 5 minutes
+                time.sleep(300)
                 with status_lock:
                     if project_id in project_status:
                         del project_status[project_id]
-            
             threading.Thread(target=cleanup_status, daemon=True).start()
 
     try:
-        # Lancer en arrière-plan
         thread = threading.Thread(target=run_scraping_with_feedback, daemon=True)
         thread.start()
         return jsonify({'success': True, 'message': 'Scraping démarré avec suivi temps réel'})
@@ -842,7 +908,6 @@ def results(project_id):
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
 
-        # Info du projet
         cursor.execute(
             'SELECT name, profession, country, language, total_results FROM projects WHERE id = ?',
             (project_id,)
@@ -853,7 +918,6 @@ def results(project_id):
             conn.close()
             return render_template('results.html', project=None, results=[], error="Projet introuvable")
 
-        # Résultats
         cursor.execute('''
         SELECT name, category, description, website, email, phone, city, source_url, scraped_at
         FROM results
@@ -877,7 +941,6 @@ def export_results(project_id):
     try:
         conn = sqlite3.connect(DATABASE)
 
-        # Récupérer les données
         try:
             df = pd.read_sql_query('''
             SELECT r.*, 
@@ -891,7 +954,6 @@ def export_results(project_id):
             ORDER BY r.scraped_at DESC
             ''', conn, params=(project_id,))
         except ImportError:
-            # Fallback sans pandas
             cursor = conn.cursor()
             cursor.execute('''
             SELECT r.*, p.name as project_name, p.profession
@@ -904,7 +966,6 @@ def export_results(project_id):
             rows = cursor.fetchall()
             headers = [description[0] for description in cursor.description]
 
-            # Export CSV simple
             import csv
             import io
             from flask import Response
@@ -924,7 +985,6 @@ def export_results(project_id):
 
         conn.close()
 
-        # ►► Imposer un ordre de colonnes stable pour le livrable XLSX
         COLS = [
             "project_name", "profession", "project_country", "project_language",
             "name", "category", "description",
@@ -936,9 +996,7 @@ def export_results(project_id):
             if c not in df.columns:
                 df[c] = ""
         df = df[COLS]
-        # ◄◄
 
-        # Créer le fichier Excel avec pandas
         filename = f'export_project_{project_id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
         filepath = os.path.join(EXPORT_FOLDER, filename)
         os.makedirs(EXPORT_FOLDER, exist_ok=True)
@@ -958,7 +1016,6 @@ def settings():
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
 
-        # Récupérer toutes les données configurables
         cursor.execute('SELECT * FROM professions ORDER BY name')
         professions = cursor.fetchall()
 
@@ -1081,7 +1138,6 @@ def api_stats():
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
 
-        # Stats par profession
         cursor.execute('''
         SELECT profession, COUNT(*) as count, SUM(total_results) as total_results
         FROM projects 
@@ -1090,7 +1146,6 @@ def api_stats():
         ''')
         prof_stats = cursor.fetchall()
 
-        # Stats par pays
         cursor.execute('''
         SELECT country, COUNT(*) as projects, SUM(total_results) as results
         FROM projects 
@@ -1114,7 +1169,6 @@ def api_stats():
             'error': str(e)
         }), 500
 
-# === Endpoint optionnel pour l'UI Studio : résultats récents ===
 @app.route('/api/recent_results')
 def recent_results():
     """Renvoie les derniers résultats (pour l'affichage dans /studio)"""
@@ -1143,15 +1197,12 @@ def debug_project(project_id):
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
         
-        # Vérifier le projet
         cursor.execute('SELECT * FROM projects WHERE id = ?', (project_id,))
         project = cursor.fetchone()
         
-        # Vérifier les résultats
         cursor.execute('SELECT COUNT(*) FROM results WHERE project_id = ?', (project_id,))
         results_count = cursor.fetchone()[0]
         
-        # Prendre quelques exemples
         cursor.execute('SELECT name, email, phone FROM results WHERE project_id = ? LIMIT 5', (project_id,))
         sample_results = cursor.fetchall()
         
@@ -1166,6 +1217,7 @@ def debug_project(project_id):
         
     except Exception as e:
         return jsonify({'error': str(e)})
+
 # === Gestion d'erreurs globale ===
 @app.errorhandler(404)
 def page_not_found(e):
@@ -1188,5 +1240,4 @@ if __name__ == '__main__':
     print("🎯 Interface simplifiée: http://localhost:5000/simple")
     print("📊 Dashboard classique: http://localhost:5000/dashboard")
 
-    # Lancer l'app
     app.run(debug=True, host='127.0.0.1', port=5000)
