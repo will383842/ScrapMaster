@@ -1,6 +1,8 @@
 # SCRAPER GÉNÉRIQUE - SCRAPMASTER
 # Nom du fichier : generic_scraper.py
 
+import os
+import random
 import time
 import re
 from datetime import datetime
@@ -8,9 +10,11 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
+from utils.ua import pick_user_agent
 from utils.normalize import (
     normalize_url, extract_emails, extract_phones, normalize_phone_list,
-    extract_socials, detect_language as detect_lang, normalize_location, normalize_name
+    extract_socials, detect_language as detect_lang, normalize_location, normalize_name,
+    extract_whatsapp, extract_line_id, extract_telegram, extract_wechat, find_contact_like_links
 )
 from utils.dedupe import fuzzy_duplicate
 
@@ -42,12 +46,20 @@ class GenericScraper:
 
     def __init__(self):
         self.headers = {
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0 Safari/537.36'
-            )
+            'User-Agent': pick_user_agent(),
+            'Accept-Language': 'en,fr;q=0.9',
+            'Cache-Control': 'no-cache'
         }
+        try:
+            self.delay_s = max(0.2, int(os.getenv("SCRAPMASTER_DELAY_MS", "1200")) / 1000.0)
+        except Exception:
+            self.delay_s = 1.2
+        try:
+            self.max_pages = max(1, int(os.getenv("SCRAPMASTER_MAX_PAGES", "6")))
+        except Exception:
+            self.max_pages = 6
+        proxy = os.getenv("SCRAPMASTER_PROXY", "").strip()
+        self.proxies = {"http": proxy, "https": proxy} if proxy else None
 
     # --------------------- Public API ---------------------
 
@@ -79,7 +91,7 @@ class GenericScraper:
                 )
                 all_results.extend(results)
                 print(f"    ✅ {len(results)} entrées trouvées")
-                time.sleep(1)  # Pause respectueuse
+                time.sleep(1)  # Pause respectueuse (garde 1s ici)
 
         # Dédup finale (fuzzy)
         deduped = []
@@ -120,14 +132,14 @@ class GenericScraper:
     # --------------------- Scraping par catégorie ---------------------
 
     def scrape_category(self, base_url, category_name, config):
-        """Scrape une catégorie spécifique (parcoupe jusqu'à 10 pages typées /page/index.html)."""
+        """Scrape une catégorie spécifique (parcourt des pages typées /page/index.html)."""
         results = []
 
-        for page in range(1, 11):
+        for page in range(1, self.max_pages + 1):
             try:
                 url = f"{base_url}{page}/index.html"
 
-                response = requests.get(url, headers=self.headers, timeout=10)
+                response = requests.get(url, headers=self.headers, timeout=10, proxies=self.proxies)
                 if response.status_code == 404:
                     if page == 1:
                         print("    ⭕ Catégorie vide")
@@ -148,7 +160,7 @@ class GenericScraper:
                         results.append(r)
 
                 print(f"    📄 Page {page}: {len(page_results)} entrées")
-                time.sleep(0.8)
+                time.sleep(self.delay_s + random.random()*0.4)
 
             except Exception as e:
                 print(f"    ❌ Erreur page {page}: {str(e)[:80]}...")
@@ -305,7 +317,7 @@ class GenericScraper:
             u = normalize_url(url)
             if not u:
                 return ""
-            r = requests.get(u, headers=self.headers, timeout=timeout)
+            r = requests.get(u, headers=self.headers, timeout=timeout, proxies=self.proxies)
             r.raise_for_status()
             return r.text or ""
         except Exception:
@@ -344,6 +356,7 @@ class GenericScraper:
         """Renforce email/téléphone/réseaux/langue/ville à partir de la page du site + description."""
         texts = [entry.get('description', '')]
 
+        html = ""
         # Récupérer le HTML de la home si un site est présent
         if entry.get('website'):
             html = self.http_get(entry['website'], timeout=8)
@@ -361,7 +374,6 @@ class GenericScraper:
         # ---- Emails (tous, dédupliqués) ----
         emails = set(extract_emails(blob))
         if entry.get('email'):
-            # entry['email'] peut déjà contenir plusieurs emails séparés ; on split
             for e in str(entry['email']).replace(',', ';').split(';'):
                 e = e.strip()
                 if e:
@@ -376,16 +388,87 @@ class GenericScraper:
         phones_norm = normalize_phone_list(raw_phones, default_region=region)
         entry['phone'] = "; ".join(phones_norm) if phones_norm else None
 
-        # ---- Réseaux sociaux (prend le premier lien trouvé pour chaque type) ----
+        # ---- Canaux directs additionnels (WhatsApp / Line ID / Telegram / WeChat) ----
+        if not entry.get('whatsapp'):
+            wa = extract_whatsapp(blob)
+            if wa:
+                entry['whatsapp'] = "; ".join(wa)
+        if not entry.get('line_id'):
+            li = extract_line_id(blob)
+            if li:
+                entry['line_id'] = "; ".join(li)
+        if not entry.get('telegram'):
+            tg = extract_telegram(blob)
+            if tg:
+                entry['telegram'] = "; ".join(tg)
+        if not entry.get('wechat'):
+            wc = extract_wechat(blob)
+            if wc:
+                entry['wechat'] = "; ".join(wc)
+
+        # ---- Réseaux sociaux (liens) ----
         socials = extract_socials(blob)
-        # On pose tous les champs retournés par extract_socials si absents
         if isinstance(socials, dict):
             for k, v in socials.items():
-                if v:
-                    # v peut être une liste : on prend le premier lien
+                if v and not entry.get(k):
                     link = v[0] if isinstance(v, (list, tuple)) and v else v
-                    if link and not entry.get(k):
+                    if link:
                         entry[k] = normalize_url(link)
+
+        # ---- Suivre jusqu'à 5 pages "Contact/About/Legal" pour grappiller des contacts ----
+        extra_htmls = []
+        if entry.get('website') and html:
+            try:
+                for u in find_contact_like_links(html, entry['website'])[:5]:
+                    h = self.http_get(u, timeout=8)
+                    if h:
+                        extra_htmls.append(h)
+                    if len(extra_htmls) >= 5:
+                        break
+            except Exception:
+                pass
+
+        if extra_htmls:
+            blob2 = " ".join(extra_htmls)
+
+            # Emails supplémentaires (sans écraser les existants)
+            more_emails = extract_emails(blob2)
+            if more_emails:
+                merged = set((entry.get('email') or "").replace(",", ";").split(";"))
+                for e in more_emails:
+                    merged.add(e)
+                merged_clean = sorted(x.strip() for x in merged if x and x.strip())
+                entry['email'] = "; ".join(merged_clean) if merged_clean else entry.get('email')
+
+            # Phones supplémentaires
+            more_phones = extract_phones(blob2)
+            if more_phones:
+                region = self.country_to_region(entry.get('country'))
+                phones_norm2 = normalize_phone_list(more_phones, default_region=region)
+                if phones_norm2:
+                    merged = set((entry.get('phone') or "").replace(",", ";").split(";"))
+                    for p in phones_norm2:
+                        merged.add(p)
+                    merged_clean = sorted(x.strip() for x in merged if x and x.strip())
+                    entry['phone'] = "; ".join(merged_clean) if merged_clean else entry.get('phone')
+
+            # Canaux directs si toujours vides
+            if not entry.get('whatsapp'):
+                wa2 = extract_whatsapp(blob2)
+                if wa2:
+                    entry['whatsapp'] = "; ".join(wa2)
+            if not entry.get('line_id'):
+                li2 = extract_line_id(blob2)
+                if li2:
+                    entry['line_id'] = "; ".join(li2)
+            if not entry.get('telegram'):
+                tg2 = extract_telegram(blob2)
+                if tg2:
+                    entry['telegram'] = "; ".join(tg2)
+            if not entry.get('wechat'):
+                wc2 = extract_wechat(blob2)
+                if wc2:
+                    entry['wechat'] = "; ".join(wc2)
 
         # ---- Langue (si inconnue) ----
         if not entry.get('language') or entry['language'] == 'unknown':

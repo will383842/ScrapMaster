@@ -102,7 +102,7 @@ class ScrapMasterApp:
             )
             ''')
 
-            # --- Migration douce : ajouter des colonnes si manquantes dans 'results' ---
+            # --- Migration douce : ajouter des colonnes si manquantes ---
             def add_column_if_missing(cursor, table, column, coltype):
                 cursor.execute(f"PRAGMA table_info({table})")
                 cols = [r[1] for r in cursor.fetchall()]
@@ -112,12 +112,26 @@ class ScrapMasterApp:
                     except Exception:
                         pass  # déjà là ou autre
 
-            # Colonnes étendues pour stocker plus d'infos de contact
+            # ►► Colonnes "compteurs & timings" au niveau PROJETS (historique)
+            add_column_if_missing(cursor, "projects", "emails_count",   "INTEGER DEFAULT 0")
+            add_column_if_missing(cursor, "projects", "phones_count",   "INTEGER DEFAULT 0")
+            add_column_if_missing(cursor, "projects", "whatsapp_count", "INTEGER DEFAULT 0")
+            add_column_if_missing(cursor, "projects", "line_id_count",  "INTEGER DEFAULT 0")
+            add_column_if_missing(cursor, "projects", "telegram_count", "INTEGER DEFAULT 0")
+            add_column_if_missing(cursor, "projects", "wechat_count",   "INTEGER DEFAULT 0")
+            add_column_if_missing(cursor, "projects", "started_at",     "TIMESTAMP")
+            add_column_if_missing(cursor, "projects", "finished_at",    "TIMESTAMP")
+            add_column_if_missing(cursor, "projects", "run_ms",         "INTEGER")
+            # ◄◄
+
+            # Colonnes étendues pour stocker plus d'infos de contact (RESULTS)
             add_column_if_missing(cursor, "results", "facebook", "TEXT")
             add_column_if_missing(cursor, "results", "instagram", "TEXT")
             add_column_if_missing(cursor, "results", "linkedin", "TEXT")
             add_column_if_missing(cursor, "results", "line_id", "TEXT")
             add_column_if_missing(cursor, "results", "whatsapp", "TEXT")
+            add_column_if_missing(cursor, "results", "telegram", "TEXT")
+            add_column_if_missing(cursor, "results", "wechat", "TEXT")
             add_column_if_missing(cursor, "results", "other_contact", "TEXT")
             add_column_if_missing(cursor, "results", "contact_name", "TEXT")
             add_column_if_missing(cursor, "results", "province", "TEXT")
@@ -397,15 +411,15 @@ def start_scraping(project_id):
             for r in results:
                 try:
                     try:
-                        # Tentative : insert avec colonnes étendues
+                        # Tentative : insert avec colonnes étendues (incl. telegram & wechat)
                         cursor.execute("""
                             INSERT INTO results (
                                 project_id, name, category, description, website,
                                 email, phone, city, country, language, source_url,
-                                facebook, instagram, linkedin, line_id, whatsapp,
+                                facebook, instagram, linkedin, line_id, whatsapp, telegram, wechat,
                                 other_contact, contact_name, province, address,
                                 latitude, longitude, raw_json, scraped_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                         """, (
                             project_id,
                             (r.get('name') or '')[:500],
@@ -423,6 +437,8 @@ def start_scraping(project_id):
                             r.get('linkedin'),
                             r.get('line_id'),
                             r.get('whatsapp'),
+                            r.get('telegram'),
+                            r.get('wechat'),
                             r.get('other_contact'),
                             r.get('contact_name'),
                             r.get('province'),
@@ -556,7 +572,11 @@ def export_results(project_id):
         # Récupérer les données
         try:
             df = pd.read_sql_query('''
-            SELECT r.*, p.name as project_name, p.profession, p.country as project_country, p.language as project_language
+            SELECT r.*, 
+                   p.name as project_name, 
+                   p.profession, 
+                   p.country as project_country, 
+                   p.language as project_language
             FROM results r
             JOIN projects p ON r.project_id = p.id
             WHERE r.project_id = ?
@@ -595,7 +615,21 @@ def export_results(project_id):
             )
         
         conn.close()
-        
+
+        # ►► Imposer un ordre de colonnes stable pour le livrable XLSX
+        COLS = [
+            "project_name", "profession", "project_country", "project_language",
+            "name", "category", "description",
+            "website", "email", "phone", "whatsapp", "line_id", "telegram", "wechat",
+            "facebook", "instagram", "linkedin",
+            "address", "city", "province", "postal_code", "source_url", "scraped_at"
+        ]
+        for c in COLS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[COLS]
+        # ◄◄
+
         # Créer le fichier Excel avec pandas
         filename = f'export_project_{project_id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
         filepath = os.path.join(EXPORT_FOLDER, filename)
