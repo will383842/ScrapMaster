@@ -132,26 +132,47 @@ class GenericScraper:
     # --------------------- Scraping par catégorie ---------------------
 
     def scrape_category(self, base_url, category_name, config):
-        """Scrape une catégorie spécifique (parcourt des pages typées /page/index.html)."""
+        """
+        Scrape une catégorie/cible avec pagination adaptative.
+        - Si c'est un annuaire paginé (URL finit par '/', ou contient /cat-, /category, /page/),
+          on parcourt jusqu'à self.max_pages avec patron /{page}/index.html.
+        - Sinon, on traite la cible telle quelle (1 page).
+        """
         results = []
 
-        for page in range(1, self.max_pages + 1):
+        # Heuristique: annuaire paginé vs. homepage/fiche
+        is_directory = (
+            base_url.endswith("/") or
+            "/cat-" in base_url or "/category" in base_url or "/page/" in base_url
+        )
+
+        pages = range(1, self.max_pages + 1) if is_directory else range(1, 2)
+
+        for page in pages:
             try:
-                url = f"{base_url}{page}/index.html"
+                if is_directory:
+                    # Patron paginé (comme Thailand Guide)
+                    url = f"{base_url}{page}/index.html" if base_url.endswith("/") else f"{base_url}/{page}/index.html"
+                else:
+                    # Cible "simple": on ne touche pas à l'URL
+                    url = base_url
 
                 response = requests.get(url, headers=self.headers, timeout=10, proxies=self.proxies)
                 if response.status_code == 404:
                     if page == 1:
-                        print("    ⭕ Catégorie vide")
+                        print("    ⭕ Catégorie/cible vide")
                     break
 
-                response.raise_for_status()
-                soup = BeautifulSoup(response.content, 'html.parser')
+                if response.status_code != 200:
+                    print(f"    ⚠️ HTTP {response.status_code} pour {url}")
+                    if not is_directory:
+                        break
+                    continue
 
+                soup = BeautifulSoup(response.content, 'html.parser')
                 page_results = self.extract_data_from_page(soup, url, category_name, config)
-                if not page_results:
-                    if page == 1:
-                        print("    ⭕ Aucune donnée extraite")
+                if not page_results and not is_directory:
+                    print("    ⭕ Rien d'extractible sur la cible")
                     break
 
                 # Dédup au fil de l’eau
@@ -159,12 +180,13 @@ class GenericScraper:
                     if not fuzzy_duplicate(r, results, threshold=90):
                         results.append(r)
 
-                print(f"    📄 Page {page}: {len(page_results)} entrées")
+                print(f"    📄 Page {page}: {len(page_results)} entrées (total {len(results)})")
                 time.sleep(self.delay_s + random.random()*0.4)
 
             except Exception as e:
-                print(f"    ❌ Erreur page {page}: {str(e)[:80]}...")
-                break
+                print(f"    ❌ Erreur page {page}: {str(e)[:120]}...")
+                if not is_directory:
+                    break
 
         return results
 
@@ -387,6 +409,11 @@ class GenericScraper:
         region = self.country_to_region(entry.get('country'))
         phones_norm = normalize_phone_list(raw_phones, default_region=region)
         entry['phone'] = "; ".join(phones_norm) if phones_norm else None
+
+        # >>> LOG OPTIONNEL : active avec SCRAPMASTER_DEBUG_CONTACTS=1
+        if os.getenv("SCRAPMASTER_DEBUG_CONTACTS", "0") == "1":
+            if entry.get('email') or entry.get('phone'):
+                print(f"    ✉️/📞 {entry.get('email') or '-'} | {entry.get('phone') or '-'}")
 
         # ---- Canaux directs additionnels (WhatsApp / Line ID / Telegram / WeChat) ----
         if not entry.get('whatsapp'):
