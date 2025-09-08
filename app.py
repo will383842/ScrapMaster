@@ -357,7 +357,7 @@ def create_project():
 
 @app.route('/start_scraping/<int:project_id>', methods=['POST'])
 def start_scraping(project_id):
-    """Lance le scraping d'un projet"""
+    """Lance le scraping d'un projet (thread séparé)"""
     if not scrap_master.scraping_engine:
         return jsonify({'success': False, 'error': 'Moteur de scraping non disponible'}), 500
     
@@ -365,6 +365,7 @@ def start_scraping(project_id):
         conn = None
         try:
             conn = sqlite3.connect(DATABASE)
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
             # Marquer comme en cours
@@ -376,28 +377,21 @@ def start_scraping(project_id):
             
             # Récupérer les infos du projet
             cursor.execute('SELECT * FROM projects WHERE id = ?', (project_id,))
-project_row = cursor.fetchone()
-if not project_row:
-    raise Exception(f"Projet {project_id} introuvable")
-
-# ► Adapter la Row en dict + décoder sources JSON
-project_cfg = dict(project_row)
-try:
-    project_cfg["sources"] = json.loads(project_cfg.get("sources") or "[]")
-except Exception:
-    project_cfg["sources"] = []
-project_cfg["keep_incomplete"] = True
-
-# Lancer le scraping via le moteur avec un dict
-results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
-
-            
-            if not project:
+            project_row = cursor.fetchone()
+            if not project_row:
                 raise Exception(f"Projet {project_id} introuvable")
-            
+
+            # Adapter la Row en dict + décoder sources JSON
+            project_cfg = dict(project_row)
+            try:
+                project_cfg["sources"] = json.loads(project_cfg.get("sources") or "[]")
+            except Exception:
+                project_cfg["sources"] = []
+            project_cfg["keep_incomplete"] = True
+
             # Lancer le scraping via le moteur
-            results = scrap_master.scraping_engine.run_scraping(project) or []
-            
+            results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
+
             # Sauvegarder les résultats
             saved_count = 0
             for r in results:
@@ -467,7 +461,6 @@ results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
                 'UPDATE projects SET status = "completed", total_results = ? WHERE id = ?',
                 (saved_count, project_id)
             )
-            
             conn.commit()
             print(f"✅ Scraping terminé: {saved_count} résultats sauvés")
             
@@ -478,7 +471,7 @@ results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
                     cursor = conn.cursor()
                     cursor.execute('UPDATE projects SET status = "error" WHERE id = ?', (project_id,))
                     conn.commit()
-            except:
+            except Exception:
                 pass
         finally:
             if conn:
@@ -488,9 +481,7 @@ results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
         # Lancer en arrière-plan
         thread = threading.Thread(target=run_scraping, daemon=True)
         thread.start()
-        
         return jsonify({'success': True, 'message': 'Scraping démarré'})
-        
     except Exception as e:
         print(f"❌ Erreur lancement scraping: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
