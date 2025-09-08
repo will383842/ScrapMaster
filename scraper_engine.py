@@ -230,7 +230,7 @@ class ScrapingEngine:
         print(f"🔧 {len(self.scrapers)} scrapers chargés")
 
     # ---------------------------------------------------------------------
-    # ORCHESTRATION AVANCÉE (Étape 5.1)
+    # ORCHESTRATION AVANCÉE
     # ---------------------------------------------------------------------
     def run_scraping(self, project):
         """
@@ -265,13 +265,10 @@ class ScrapingEngine:
         
         # --- 1) RECHERCHE SÉMANTIQUE AVANCÉE ---
         try:
-            # Import du SearchScraper amélioré
             from scrapers.search_scraper import SearchScraper
             searcher = SearchScraper()
-            
             found_urls = searcher.search(profession, country, language, extra_keywords=keywords) or []
             print(f"🔍 Recherche sémantique: {len(found_urls)} URLs trouvées")
-            
         except Exception as e:
             print(f"⚠️ Erreur recherche sémantique: {e}")
             found_urls = []
@@ -292,7 +289,7 @@ class ScrapingEngine:
         elif isinstance(srcs, dict) and srcs.get("seed_sources"):
             seeds = srcs["seed_sources"]
         
-        # Sources pays validées (avec profession pour spécialisation)
+        # Sources pays validées
         try:
             validated_country_sources = _load_sources_cached(country, profession) or []  # type: ignore[arg-type]
         except Exception:
@@ -321,32 +318,22 @@ class ScrapingEngine:
         
         # --- 4) ENRICHISSEMENT MULTI-SOURCES ---
         enriched_results = []
-        
         if raw_results:
             print(f"🔄 Début enrichissement multi-sources...")
-            
             try:
                 from enrichers.multi_source_enricher import multi_enricher
-                
                 for i, result in enumerate(raw_results):
                     try:
                         enriched_result = multi_enricher.enrich_entry_complete(result, cfg)
                         enriched_results.append(enriched_result)
-                        
-                        # Progress indication
                         if (i + 1) % 10 == 0:
                             print(f"🔄 Enrichissement: {i + 1}/{len(raw_results)} traités")
-                        
-                        # Délai pour éviter surcharge
                         if i % 5 == 0:
                             time.sleep(0.5)
-                            
                     except Exception as e:
                         print(f"⚠️ Erreur enrichissement résultat {i}: {e}")
                         enriched_results.append(result)  # Garder non enrichi
-                
                 print(f"✅ Enrichissement terminé: {len(enriched_results)} résultats enrichis")
-                
             except ImportError:
                 print("⚠️ Enrichisseur non disponible, utilisation données brutes")
                 enriched_results = raw_results
@@ -355,6 +342,16 @@ class ScrapingEngine:
                 enriched_results = raw_results
         else:
             enriched_results = raw_results
+
+        # --- 4.b) BOOST QUALITÉ SI LANGUE OK (rectification demandée) ---
+        # Si la langue de la page matche la langue demandée, on garantit un quality_score >= 7
+        for r in enriched_results or []:
+            try:
+                if r.get("language_match"):
+                    r["quality_score"] = max(r.get("quality_score", 5), 7)
+            except Exception:
+                # On ne casse jamais le pipeline pour un score
+                pass
         
         # --- 5) VALIDATION ET NETTOYAGE FINAL ---
         validated_results = self.validate_results(enriched_results, cfg)
@@ -504,7 +501,7 @@ class ScrapingEngine:
                 stats["skipped_no_contact"] += 1
                 continue
 
-            # Nettoyage final (on garde ton pipeline existant)
+            # Nettoyage final
             cleaned = self._clean_result_advanced(result, config)
             validated.append(cleaned)
 
@@ -574,7 +571,7 @@ class ScrapingEngine:
         }
         return cleaned
 
-    # --- Nettoyage avancé avec fusion des enrichissements ---
+    # --- Nettoyage avancé avec gestion des enrichissements ---
     def _clean_result_advanced(self, r: dict, config: dict) -> dict:
         """Nettoyage avancé avec gestion des enrichissements"""
         cleaned = self._clean_result(r, config)
