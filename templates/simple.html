@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScrapMaster - Collecteur de Contacts Intelligent</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+            padding: 20px 0;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+
+        .main-card {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
+
+        .step-indicator {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 40px;
+        }
+
+        .step {
+            display: flex;
+            align-items: center;
+            margin: 0 15px;
+            padding: 10px 20px;
+            border-radius: 25px;
+            transition: all 0.3s;
+        }
+
+        .step.active {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            transform: scale(1.05);
+        }
+
+        .step.completed {
+            background: #10b981;
+            color: white;
+        }
+
+        .step-number {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 10px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .step.active .step-number {
+            background: white;
+            color: #667eea;
+        }
+
+        .step.completed .step-number {
+            background: white;
+            color: #10b981;
+        }
+
+        .form-section {
+            display: none;
+            animation: fadeIn 0.5s ease-in;
+        }
+
+        .form-section.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .question {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .question h2 {
+            font-size: 1.8rem;
+            color: #2d3748;
+            margin-bottom: 10px;
+        }
+
+        .question p {
+            color: #718096;
+            font-size: 1.1rem;
+        }
+
+        .options-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .option-card {
+            border: 2px solid #e2e8f0;
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #f8fafc;
+        }
+
+        .option-card:hover {
+            border-color: #667eea;
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.15);
+        }
+
+        .option-card.selected {
+            border-color: #667eea;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            transform: translateY(-5px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
+        }
+
+        .option-icon {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .option-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .option-description {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+        .action-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 30px;
+        }
+
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            min-width: 120px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: #f1f5f9;
+            color: #64748b;
+        }
+
+        .btn-secondary:hover {
+            background: #e2e8f0;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .progress-section {
+            background: #f8fafc;
+            border-radius: 15px;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .progress-circle {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: conic-gradient(#667eea 0deg, #e2e8f0 0deg);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            position: relative;
+        }
+
+        .progress-circle::before {
+            content: '';
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            background: white;
+            position: absolute;
+        }
+
+        .progress-text {
+            position: relative;
+            z-index: 1;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .live-log {
+            background: #1a202c;
+            color: #e2e8f0;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            height: 200px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.9rem;
+        }
+
+        .log-entry {
+            margin: 5px 0;
+            padding: 5px 0;
+        }
+
+        .log-success { color: #68d391; }
+        .log-warning { color: #faf089; }
+        .log-error { color: #fc8181; }
+
+        .results-preview {
+            background: #f0fff4;
+            border: 2px solid #68d391;
+            border-radius: 15px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .summary-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .summary-number {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .summary-label {
+            color: #718096;
+            font-size: 0.9rem;
+        }
+
+        .floating-help {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+            transition: all 0.3s;
+        }
+
+        .floating-help:hover {
+            transform: scale(1.1);
+        }
+
+        .hidden { display: none !important; }
+
+        .input-field {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 10px;
+            font-size: 1.1rem;
+            margin: 10px 0;
+            transition: border-color 0.3s;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 ScrapMaster</h1>
+            <p>Trouvez facilement des contacts professionnels</p>
+        </div>
+
+        <div class="main-card">
+            <!-- Indicateur d'étapes -->
+            <div class="step-indicator">
+                <div class="step active" data-step="1">
+                    <div class="step-number">1</div>
+                    <span>Quoi chercher</span>
+                </div>
+                <div class="step" data-step="2">
+                    <div class="step-number">2</div>
+                    <span>Où chercher</span>
+                </div>
+                <div class="step" data-step="3">
+                    <div class="step-number">3</div>
+                    <span>Configuration</span>
+                </div>
+                <div class="step" data-step="4">
+                    <div class="step-number">4</div>
+                    <span>Lancement</span>
+                </div>
+            </div>
+
+            <!-- Étape 1: Type de professionnel -->
+            <div class="form-section active" data-section="1">
+                <div class="question">
+                    <h2>Quels professionnels recherchez-vous ?</h2>
+                    <p>Choisissez le type de contacts que vous souhaitez trouver</p>
+                </div>
+                
+                <div class="options-grid">
+                    <div class="option-card" data-value="Avocats">
+                        <div class="option-icon">⚖️</div>
+                        <div class="option-title">Avocats</div>
+                        <div class="option-description">Cabinets juridiques, avocats spécialisés</div>
+                    </div>
+                    <div class="option-card" data-value="Associations">
+                        <div class="option-icon">🤝</div>
+                        <div class="option-title">Associations</div>
+                        <div class="option-description">ONG, associations humanitaires</div>
+                    </div>
+                    <div class="option-card" data-value="YouTubeurs">
+                        <div class="option-icon">📺</div>
+                        <div class="option-title">YouTubeurs</div>
+                        <div class="option-description">Créateurs de contenu, influenceurs</div>
+                    </div>
+                    <div class="option-card" data-value="Traducteurs">
+                        <div class="option-icon">🌐</div>
+                        <div class="option-title">Traducteurs</div>
+                        <div class="option-description">Traducteurs, interprètes</div>
+                    </div>
+                    <div class="option-card" data-value="Digital Nomads">
+                        <div class="option-icon">💻</div>
+                        <div class="option-title">Digital Nomads</div>
+                        <div class="option-description">Travailleurs nomades, freelances</div>
+                    </div>
+                    <div class="option-card" data-value="Restaurateurs">
+                        <div class="option-icon">🍽️</div>
+                        <div class="option-title">Restaurateurs</div>
+                        <div class="option-description">Restaurants, food business</div>
+                    </div>
+                </div>
+
+                <div class="action-buttons">
+                    <button class="btn btn-primary" onclick="nextStep()" disabled id="step1Next">
+                        Continuer →
+                    </button>
+                </div>
+            </div>
+
+            <!-- Étape 2: Zone géographique -->
+            <div class="form-section" data-section="2">
+                <div class="question">
+                    <h2>Dans quelle zone géographique ?</h2>
+                    <p>Sélectionnez le pays ou la région de recherche</p>
+                </div>
+                
+                <div class="options-grid">
+                    <div class="option-card" data-value="Thaïlande">
+                        <div class="option-icon">🇹🇭</div>
+                        <div class="option-title">Thaïlande</div>
+                        <div class="option-description">Royaume de Thaïlande</div>
+                    </div>
+                    <div class="option-card" data-value="France">
+                        <div class="option-icon">🇫🇷</div>
+                        <div class="option-title">France</div>
+                        <div class="option-description">République française</div>
+                    </div>
+                    <div class="option-card" data-value="Expatriés Thaïlande">
+                        <div class="option-icon">🌏</div>
+                        <div class="option-title">Expatriés Thaïlande</div>
+                        <div class="option-description">Communauté expatriée</div>
+                    </div>
+                    <div class="option-card" data-value="Royaume-Uni">
+                        <div class="option-icon">🇬🇧</div>
+                        <div class="option-title">Royaume-Uni</div>
+                        <div class="option-description">Grande-Bretagne</div>
+                    </div>
+                    <div class="option-card" data-value="États-Unis">
+                        <div class="option-icon">🇺🇸</div>
+                        <div class="option-title">États-Unis</div>
+                        <div class="option-description">United States</div>
+                    </div>
+                    <div class="option-card" data-value="Allemagne">
+                        <div class="option-icon">🇩🇪</div>
+                        <div class="option-title">Allemagne</div>
+                        <div class="option-description">Deutschland</div>
+                    </div>
+                </div>
+
+                <div class="action-buttons">
+                    <button class="btn btn-secondary" onclick="prevStep()">← Retour</button>
+                    <button class="btn btn-primary" onclick="nextStep()" disabled id="step2Next">
+                        Continuer →
+                    </button>
+                </div>
+            </div>
+
+            <!-- Étape 3: Configuration -->
+            <div class="form-section" data-section="3">
+                <div class="question">
+                    <h2>Derniers détails</h2>
+                    <p>Affinez votre recherche</p>
+                </div>
+
+                <div style="max-width: 500px; margin: 0 auto;">
+                    <label for="language" style="display: block; margin-bottom: 10px; font-weight: 600;">
+                        Langue principale :
+                    </label>
+                    <select id="language" class="input-field">
+                        <option value="fr">🇫🇷 Français</option>
+                        <option value="en">🇬🇧 Anglais</option>
+                        <option value="th">🇹🇭 Thaï</option>
+                        <option value="de">🇩🇪 Allemand</option>
+                        <option value="es">🇪🇸 Espagnol</option>
+                    </select>
+
+                    <label for="keywords" style="display: block; margin: 20px 0 10px; font-weight: 600;">
+                        Mots-clés spécifiques (optionnel) :
+                    </label>
+                    <input type="text" id="keywords" class="input-field" 
+                           placeholder="Ex: immigration, humanitaire, expatrié...">
+
+                    <label for="projectName" style="display: block; margin: 20px 0 10px; font-weight: 600;">
+                        Nom de votre recherche :
+                    </label>
+                    <input type="text" id="projectName" class="input-field" 
+                           placeholder="Ex: Avocats Thaïlande 2025">
+                </div>
+
+                <div class="action-buttons">
+                    <button class="btn btn-secondary" onclick="prevStep()">← Retour</button>
+                    <button class="btn btn-primary" onclick="nextStep()">
+                        Lancer la recherche →
+                    </button>
+                </div>
+            </div>
+
+            <!-- Étape 4: Recherche en cours -->
+            <div class="form-section" data-section="4">
+                <div class="question">
+                    <h2 id="searchTitle">🔍 Recherche en cours...</h2>
+                    <p id="searchSubtitle">Nous analysons le web pour trouver vos contacts</p>
+                </div>
+
+                <div class="progress-section">
+                    <div class="progress-circle" id="progressCircle">
+                        <div class="progress-text" id="progressText">0%</div>
+                    </div>
+                    
+                    <div id="currentStep" style="font-size: 1.2rem; color: #64748b; margin-bottom: 20px;">
+                        Initialisation...
+                    </div>
+
+                    <div class="live-log" id="liveLog">
+                        <div class="log-entry">🚀 Démarrage de ScrapMaster...</div>
+                    </div>
+
+                    <div id="results-summary" class="results-preview hidden">
+                        <h3 style="color: #059669; margin-bottom: 15px;">✅ Recherche terminée !</h3>
+                        <div class="summary-cards">
+                            <div class="summary-card">
+                                <div class="summary-number" id="totalFound">0</div>
+                                <div class="summary-label">Contacts trouvés</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-number" id="emailsFound">0</div>
+                                <div class="summary-label">Emails récupérés</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-number" id="phonesFound">0</div>
+                                <div class="summary-label">Téléphones</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-number" id="websitesFound">0</div>
+                                <div class="summary-label">Sites web</div>
+                            </div>
+                        </div>
+                        
+                        <div style="margin-top: 20px;">
+                            <button class="btn btn-primary" onclick="downloadResults()">
+                                📥 Télécharger les résultats
+                            </button>
+                            <button class="btn btn-secondary" onclick="restartSearch()">
+                                🔄 Nouvelle recherche
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bouton d'aide flottant -->
+    <button class="floating-help" onclick="showHelp()" title="Aide">❓</button>
+
+    <script>
+        // État de l'application
+        let currentStep = 1;
+        let searchData = {
+            profession: null,
+            country: null,
+            language: 'fr',
+            keywords: '',
+            projectName: ''
+        };
+        let currentProjectId = null;
+        let searchInterval = null;
+
+        // Gestion des étapes
+        function updateStepIndicator() {
+            document.querySelectorAll('.step').forEach((step, index) => {
+                const stepNum = index + 1;
+                step.classList.remove('active', 'completed');
+                
+                if (stepNum < currentStep) {
+                    step.classList.add('completed');
+                } else if (stepNum === currentStep) {
+                    step.classList.add('active');
+                }
+            });
+        }
+
+        function showSection(sectionNum) {
+            document.querySelectorAll('.form-section').forEach(section => {
+                section.classList.remove('active');
+            });
+            
+            const targetSection = document.querySelector(`[data-section="${sectionNum}"]`);
+            if (targetSection) {
+                targetSection.classList.add('active');
+            }
+        }
+
+        function nextStep() {
+            if (currentStep < 4) {
+                currentStep++;
+                updateStepIndicator();
+                showSection(currentStep);
+                
+                if (currentStep === 3) {
+                    generateProjectName();
+                } else if (currentStep === 4) {
+                    startSearch();
+                }
+            }
+        }
+
+        function prevStep() {
+            if (currentStep > 1) {
+                currentStep--;
+                updateStepIndicator();
+                showSection(currentStep);
+            }
+        }
+
+        // Gestion des sélections
+        function handleOptionSelection(step) {
+            const cards = document.querySelectorAll(`[data-section="${step}"] .option-card`);
+            const nextButton = document.getElementById(`step${step}Next`);
+            
+            cards.forEach(card => {
+                card.addEventListener('click', () => {
+                    // Désélectionner les autres
+                    cards.forEach(c => c.classList.remove('selected'));
+                    // Sélectionner la carte cliquée
+                    card.classList.add('selected');
+                    
+                    // Sauvegarder la sélection
+                    const value = card.dataset.value;
+                    if (step === 1) {
+                        searchData.profession = value;
+                    } else if (step === 2) {
+                        searchData.country = value;
+                    }
+                    
+                    // Activer le bouton suivant
+                    if (nextButton) {
+                        nextButton.disabled = false;
+                    }
+                });
+            });
+        }
+
+        // Génération automatique du nom de projet
+        function generateProjectName() {
+            if (!searchData.projectName) {
+                const name = `${searchData.profession} ${searchData.country} ${new Date().toLocaleDateString('fr-FR')}`;
+                document.getElementById('projectName').value = name;
+                searchData.projectName = name;
+            }
+        }
+
+        // Démarrage de la recherche
+        async function startSearch() {
+            // Récupérer les valeurs finales
+            searchData.language = document.getElementById('language').value;
+            searchData.keywords = document.getElementById('keywords').value;
+            searchData.projectName = document.getElementById('projectName').value || 
+                                   `${searchData.profession} ${searchData.country} ${new Date().toLocaleDateString('fr-FR')}`;
+
+            addLog('🎯 Configuration de la recherche...');
+            addLog(`📋 Type: ${searchData.profession}`);
+            addLog(`🌍 Zone: ${searchData.country}`);
+            addLog(`🗣️ Langue: ${searchData.language}`);
+
+            try {
+                addLog('📝 Création du projet...');
+                const response = await fetch('/api/quick_search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        profession: searchData.profession,
+                        country: searchData.country,
+                        language: searchData.language,
+                        keywords: searchData.keywords,
+                        projectName: searchData.projectName
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (!result.success) {
+                    throw new Error(result.error || 'Erreur création projet');
+                }
+                
+                currentProjectId = result.project_id;
+                addLog(`✅ Projet créé (ID: ${currentProjectId})`);
+                addLog('🚀 Lancement de la collecte...');
+                addLog('⏱️ Collecte démarrée, suivi en temps réel...');
+                
+                // Démarrer le suivi RÉEL
+                startRealProgressTracking();
+                
+            } catch (error) {
+                addLog(`❌ Erreur: ${error.message}`, 'error');
+                document.getElementById('searchTitle').textContent = '❌ Erreur de recherche';
+                document.getElementById('searchSubtitle').textContent = 'Une erreur est survenue';
+            }
+        }
+
+        // Suivi de progression RÉEL (corrigé)
+        function startRealProgressTracking() {
+            if (!currentProjectId) return;
+            
+            searchInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/search_status/${currentProjectId}`);
+                    if (!response.ok) {
+                        throw new Error('Erreur API statut');
+                    }
+                    
+                    const status = await response.json();
+                    
+                    // Mettre à jour la progression
+                    updateProgress(status.progress || 0, status.current_step || 'En cours...');
+                    
+                    // Vérifier si terminé
+                    if (status.status === 'completed') {
+                        clearInterval(searchInterval);
+                        finishSearch(status);
+                    } else if (status.status === 'error') {
+                        clearInterval(searchInterval);
+                        addLog('❌ Erreur dans la collecte', 'error');
+                        document.getElementById('searchTitle').textContent = '❌ Erreur de recherche';
+                    }
+                    
+                } catch (error) {
+                    // En cas d'erreur API, continuer le polling sans afficher d'erreur
+                    console.log('Erreur polling:', error);
+                }
+            }, 2000); // Vérifier toutes les 2 secondes
+        }
+
+        function finishSearch(results) {
+            updateProgress(100, 'Terminé !');
+            addLog('🎉 Recherche terminée avec succès !', 'success');
+            
+            document.getElementById('searchTitle').textContent = '🎉 Recherche terminée !';
+            document.getElementById('searchSubtitle').textContent = 'Vos contacts ont été collectés';
+            
+            // Afficher le résumé
+            document.getElementById('totalFound').textContent = results.total_results || 0;
+            document.getElementById('emailsFound').textContent = results.emails_count || 0;
+            document.getElementById('phonesFound').textContent = results.phones_count || 0;
+            document.getElementById('websitesFound').textContent = results.total_results || 0;
+            
+            document.getElementById('results-summary').classList.remove('hidden');
+        }
+
+        function updateProgress(percent, step) {
+            const circle = document.getElementById('progressCircle');
+            const text = document.getElementById('progressText');
+            const stepText = document.getElementById('currentStep');
+            
+            // Mettre à jour le cercle de progression
+            const degrees = (percent / 100) * 360;
+            circle.style.background = `conic-gradient(#667eea ${degrees}deg, #e2e8f0 ${degrees}deg)`;
+            
+            // Mettre à jour le texte
+            text.textContent = Math.round(percent) + '%';
+            stepText.textContent = step;
+        }
+
+        function addLog(message, type = 'info') {
+            const log = document.getElementById('liveLog');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            
+            const time = new Date().toLocaleTimeString();
+            entry.textContent = `[${time}] ${message}`;
+            
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+            
+            // Limiter à 50 entrées
+            if (log.children.length > 50) {
+                log.removeChild(log.firstChild);
+            }
+        }
+
+        // Actions finales
+        async function downloadResults() {
+            if (currentProjectId) {
+                addLog('📥 Téléchargement des résultats...');
+                window.location.href = `/export/${currentProjectId}`;
+            }
+        }
+
+        function restartSearch() {
+            // Nettoyer l'intervalle
+            if (searchInterval) {
+                clearInterval(searchInterval);
+                searchInterval = null;
+            }
+            
+            // Réinitialiser l'état
+            currentStep = 1;
+            searchData = {
+                profession: null,
+                country: null,
+                language: 'fr',
+                keywords: '',
+                projectName: ''
+            };
+            currentProjectId = null;
+            
+            // Réinitialiser l'interface
+            document.querySelectorAll('.option-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            
+            document.querySelectorAll('input, select').forEach(input => {
+                input.value = '';
+            });
+            
+            document.getElementById('results-summary').classList.add('hidden');
+            document.getElementById('liveLog').innerHTML = '<div class="log-entry">🚀 Prêt pour une nouvelle recherche...</div>';
+            
+            updateStepIndicator();
+            showSection(1);
+            
+            // Désactiver les boutons
+            document.getElementById('step1Next').disabled = true;
+            document.getElementById('step2Next').disabled = true;
+        }
+
+        function showHelp() {
+            const helpText = `
+🔍 ScrapMaster - Guide d'utilisation
+
+1️⃣ ÉTAPE 1: Choisissez le type de professionnel
+   • Sélectionnez une catégorie (avocats, associations, etc.)
+
+2️⃣ ÉTAPE 2: Sélectionnez la zone géographique  
+   • Choisissez un pays ou une région
+
+3️⃣ ÉTAPE 3: Configurez votre recherche
+   • Langue principale des contacts
+   • Mots-clés spécifiques (optionnel)
+   • Nom de votre recherche
+
+4️⃣ ÉTAPE 4: Lancement automatique
+   • La recherche se lance automatiquement
+   • Suivez la progression en temps réel
+   • Téléchargez vos résultats
+
+💡 CONSEILS:
+• Plus vos critères sont précis, meilleurs sont les résultats
+• Les mots-clés aident à affiner la recherche
+• La collecte peut prendre 30 secondes à 2 minutes
+
+❓ PROBLÈME? 
+Actualisez la page si la progression reste bloquée.
+            `;
+            alert(helpText);
+        }
+
+        // Initialisation
+        document.addEventListener('DOMContentLoaded', () => {
+            // Configurer les gestionnaires d'événements pour les sélections
+            handleOptionSelection(1);
+            handleOptionSelection(2);
+            
+            // Gestion des champs de l'étape 3
+            document.getElementById('language').addEventListener('change', (e) => {
+                searchData.language = e.target.value;
+            });
+            
+            document.getElementById('keywords').addEventListener('input', (e) => {
+                searchData.keywords = e.target.value;
+            });
+            
+            document.getElementById('projectName').addEventListener('input', (e) => {
+                searchData.projectName = e.target.value;
+            });
+            
+            // Animation d'entrée
+            setTimeout(() => {
+                document.querySelector('.main-card').style.opacity = '1';
+                document.querySelector('.main-card').style.transform = 'translateY(0)';
+            }, 100);
+            
+            addLog('🎯 ScrapMaster initialisé - Prêt à démarrer !', 'success');
+        });
+
+        // CSS d'animation pour l'entrée
+        document.querySelector('.main-card').style.opacity = '0';
+        document.querySelector('.main-card').style.transform = 'translateY(20px)';
+        document.querySelector('.main-card').style.transition = 'all 0.6s ease';
+    </script>
+</body>
+</html>

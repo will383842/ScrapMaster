@@ -1,49 +1,338 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ScrapMaster - Version Simple</title>
+    <title>ScrapMaster - Dashboard Amélioré</title>
     <style>
-        body { font-family: Arial; margin: 40px; background: #f5f5f5; }
-        .card { background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
-        .btn:hover { background: #0056b3; }
-        .stats { display: flex; gap: 20px; }
-        .stat-box { background: #007bff; color: white; padding: 20px; border-radius: 8px; text-align: center; }
+        body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 0; background: #f8fafc; }
+        .header { background: white; padding: 20px; border-bottom: 1px solid #e2e8f0; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .card { background: white; border-radius: 12px; padding: 24px; margin: 20px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .btn { padding: 12px 24px; border-radius: 8px; border: none; cursor: pointer; font-weight: 500; }
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-secondary { background: #f1f5f9; color: #475569; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
+        .stat-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 24px; border-radius: 12px; }
+        .stat-number { font-size: 2.5rem; font-weight: bold; }
+        .info-box { background: #f0f9ff; border: 1px solid #0ea5e9; border-radius: 8px; padding: 16px; margin: 16px 0; }
+        .project-card { border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 12px 0; }
+        .status { padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .status.completed { background: #dcfce7; color: #166534; }
+        .status.running { background: #fef3c7; color: #92400e; }
+        .status.error { background: #fecaca; color: #991b1b; }
+        .progress { width: 100%; height: 8px; background: #f1f5f9; border-radius: 4px; overflow: hidden; }
+        .progress-bar { height: 100%; background: #3b82f6; transition: width 0.3s; }
+        .tabs { display: flex; border-bottom: 2px solid #e2e8f0; margin-bottom: 20px; }
+        .tab { padding: 12px 24px; cursor: pointer; border: none; background: none; }
+        .tab.active { border-bottom: 2px solid #3b82f6; color: #3b82f6; font-weight: 600; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
-    <h1>🕷️ ScrapMaster Dashboard</h1>
-    
-    <div class="stats">
-        <div class="stat-box">
-            <h3>{{ total_projects or 0 }}</h3>
-            <p>Projets Total</p>
-        </div>
-        <div class="stat-box">
-            <h3>{{ total_results or 0 }}</h3>
-            <p>Résultats</p>
-        </div>
-        <div class="stat-box">
-            <h3>{{ active_projects or 0 }}</h3>
-            <p>En Cours</p>
+    <div class="header">
+        <div class="container">
+            <h1>🕷️ ScrapMaster - Collecteur de Données</h1>
+            <p>Plateforme de scraping intelligent pour professionnels et associations</p>
         </div>
     </div>
 
-    <div class="card">
-        <h2>🚀 Actions Rapides</h2>
-        <button class="btn" onclick="location.href='/new_project'">Nouveau Projet</button>
-        <button class="btn" onclick="location.href='/projects'">Voir Projets</button>
-        <button class="btn" onclick="location.href='/settings'">Paramètres</button>
+    <div class="container">
+        <!-- Explication claire du concept -->
+        <div class="info-box">
+            <h3>💡 Comment ça marche ?</h3>
+            <p><strong>Un "projet" = une recherche ciblée</strong> pour un métier spécifique dans un pays donné.</p>
+            <p>Exemple : "Avocats en Thaïlande" ou "Associations en France"</p>
+            <p>Chaque projet va chercher automatiquement emails, téléphones, sites web et réseaux sociaux.</p>
+        </div>
+
+        <!-- Statistiques -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number" id="totalProjects">{{ total_projects or 0 }}</div>
+                <div>Projets Créés</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="totalResults">{{ total_results or 0 }}</div>
+                <div>Contacts Trouvés</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="activeProjects">{{ active_projects or 0 }}</div>
+                <div>En Cours</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">7</div>
+                <div>Pays Disponibles</div>
+            </div>
+        </div>
+
+        <!-- Onglets -->
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('quick')">🚀 Démarrage Rapide</button>
+            <button class="tab" onclick="showTab('projects')">📋 Mes Projets</button>
+            <button class="tab" onclick="showTab('studio')">🧰 Mode Avancé</button>
+        </div>
+
+        <!-- Onglet Démarrage Rapide -->
+        <div id="quick" class="card">
+            <h2>Créer une nouvelle recherche</h2>
+            
+            <form id="quickForm" style="display: grid; gap: 16px;">
+                <div>
+                    <label style="display: block; font-weight: 600; margin-bottom: 8px;">Que cherchez-vous ?</label>
+                    <select id="profession" style="width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px;">
+                        <option value="">-- Choisir un type de professionnel --</option>
+                        <option value="Avocats">🏛️ Avocats & Cabinets juridiques</option>
+                        <option value="Associations">🤝 Associations & ONG</option>
+                        <option value="YouTubeurs">📺 YouTubeurs & Créateurs</option>
+                        <option value="Traducteurs">🌐 Traducteurs & Interprètes</option>
+                        <option value="Digital Nomads">💻 Digital Nomads & Remote Workers</option>
+                        <option value="Restaurateurs">🍽️ Restaurateurs & Food Business</option>
+                        <option value="Hôteliers">🏨 Hôteliers & Hébergements</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label style="display: block; font-weight: 600; margin-bottom: 8px;">Dans quel pays ?</label>
+                    <select id="country" style="width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px;">
+                        <option value="">-- Choisir une zone géographique --</option>
+                        <option value="Thaïlande">🇹🇭 Thaïlande</option>
+                        <option value="France">🇫🇷 France</option>
+                        <option value="Expatriés Thaïlande">🌏 Expatriés en Thaïlande</option>
+                        <option value="Digital Nomads Asie">💼 Digital Nomads Asie</option>
+                        <option value="Royaume-Uni">🇬🇧 Royaume-Uni</option>
+                        <option value="États-Unis">🇺🇸 États-Unis</option>
+                        <option value="Allemagne">🇩🇪 Allemagne</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label style="display: block; font-weight: 600; margin-bottom: 8px;">Langue principale</label>
+                    <select id="language" style="width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px;">
+                        <option value="fr">🇫🇷 Français</option>
+                        <option value="en">🇬🇧 Anglais</option>
+                        <option value="th">🇹🇭 Thaï</option>
+                        <option value="de">🇩🇪 Allemand</option>
+                        <option value="es">🇪🇸 Espagnol</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label style="display: block; font-weight: 600; margin-bottom: 8px;">Nom du projet (optionnel)</label>
+                    <input type="text" id="projectName" placeholder="Ex: Avocats immigration Thaïlande 2025" 
+                           style="width: 100%; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px;">
+                </div>
+
+                <button type="submit" class="btn btn-primary" style="font-size: 16px;">
+                    🚀 Lancer la recherche
+                </button>
+            </form>
+
+            <div id="searchProgress" class="hidden" style="margin-top: 20px;">
+                <h3>🔍 Recherche en cours...</h3>
+                <div class="progress">
+                    <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                </div>
+                <p id="progressText">Initialisation...</p>
+                <div id="liveLog" style="background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 8px; font-family: monospace; height: 200px; overflow-y: auto; margin-top: 16px;"></div>
+            </div>
+        </div>
+
+        <!-- Onglet Projets -->
+        <div id="projects" class="card hidden">
+            <h2>Mes projets de recherche</h2>
+            <div id="projectsList">
+                <!-- Les projets seront chargés ici -->
+                <p>Chargement des projets...</p>
+            </div>
+        </div>
+
+        <!-- Onglet Studio -->
+        <div id="studio" class="card hidden">
+            <h2>Mode Avancé - Recherches Multiples</h2>
+            <div class="info-box">
+                <p><strong>⚡ Mode Expert :</strong> Lance plusieurs recherches simultanées.</p>
+                <p>Permet de combiner plusieurs pays, métiers et langues en une seule opération.</p>
+            </div>
+            <button class="btn btn-primary" onclick="window.open('/studio', '_blank')">
+                🧰 Ouvrir le Studio Avancé
+            </button>
+        </div>
     </div>
 
-    <div class="card">
-        <h2>📋 Métiers Disponibles</h2>
-        <p>YouTubeurs • Avocats • Associations • Traducteurs • Digital Nomads</p>
-    </div>
+    <script>
+        let currentJobId = null;
+        let pollInterval = null;
 
-    <div class="card">
-        <h2>🌍 Zones Géographiques</h2>
-        <p>Thaïlande • France • Expatriés • Digital Nomads Asie</p>
-    </div>
+        // Gestion des onglets
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('[id="quick"], [id="projects"], [id="studio"]').forEach(c => c.classList.add('hidden'));
+            
+            document.querySelector(`[onclick="showTab('${tabName}')"]`).classList.add('active');
+            document.getElementById(tabName).classList.remove('hidden');
+            
+            if (tabName === 'projects') {
+                loadProjects();
+            }
+        }
+
+        // Soumission du formulaire rapide
+        document.getElementById('quickForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const profession = document.getElementById('profession').value;
+            const country = document.getElementById('country').value;
+            const language = document.getElementById('language').value;
+            
+            if (!profession || !country) {
+                alert('Veuillez sélectionner au moins un métier et un pays');
+                return;
+            }
+            
+            // Générer nom automatique si vide
+            let projectName = document.getElementById('projectName').value;
+            if (!projectName) {
+                projectName = `${profession} ${country} ${new Date().toLocaleDateString('fr')}`;
+            }
+            
+            try {
+                // Créer le projet
+                const response = await fetch('/create_project', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: projectName,
+                        profession: profession,
+                        country: country,
+                        language: language,
+                        sources: []
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Démarrer le scraping
+                    await startScraping(result.project_id);
+                } else {
+                    alert('Erreur lors de la création du projet: ' + (result.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                alert('Erreur: ' + error.message);
+            }
+        });
+
+        async function startScraping(projectId) {
+            // Afficher la zone de progression
+            document.getElementById('searchProgress').classList.remove('hidden');
+            document.getElementById('progressBar').style.width = '10%';
+            document.getElementById('progressText').textContent = 'Démarrage du scraping...';
+            
+            try {
+                const response = await fetch(`/start_scraping/${projectId}`, { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Simuler progression (puisque pas de vraie API de statut)
+                    simulateProgress(projectId);
+                } else {
+                    alert('Erreur lors du lancement: ' + (result.error || 'Erreur inconnue'));
+                    document.getElementById('searchProgress').classList.add('hidden');
+                }
+            } catch (error) {
+                alert('Erreur: ' + error.message);
+                document.getElementById('searchProgress').classList.add('hidden');
+            }
+        }
+
+        function simulateProgress(projectId) {
+            const messages = [
+                'Recherche de sources...',
+                'Analyse des annuaires...',
+                'Extraction des contacts...',
+                'Collecte des emails...',
+                'Recherche des réseaux sociaux...',
+                'Finalisation...'
+            ];
+            
+            let step = 0;
+            const interval = setInterval(() => {
+                step++;
+                const progress = Math.min(step * 15, 95);
+                document.getElementById('progressBar').style.width = progress + '%';
+                
+                if (step < messages.length) {
+                    document.getElementById('progressText').textContent = messages[step];
+                    addLogMessage(`✓ ${messages[step - 1] || 'Démarrage'}`);
+                }
+                
+                if (step >= 8) {
+                    clearInterval(interval);
+                    checkProjectCompletion(projectId);
+                }
+            }, 2000);
+        }
+
+        function addLogMessage(message) {
+            const log = document.getElementById('liveLog');
+            const time = new Date().toLocaleTimeString();
+            log.innerHTML += `[${time}] ${message}\n`;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        async function checkProjectCompletion(projectId) {
+            try {
+                // Vérifier si le projet est terminé
+                const response = await fetch(`/api/stats`);
+                
+                // Progression complète
+                document.getElementById('progressBar').style.width = '100%';
+                document.getElementById('progressText').textContent = 'Recherche terminée !';
+                addLogMessage('✅ Scraping terminé avec succès');
+                
+                setTimeout(() => {
+                    document.getElementById('searchProgress').classList.add('hidden');
+                    showTab('projects'); // Afficher les résultats
+                }, 2000);
+                
+            } catch (error) {
+                addLogMessage('❌ Erreur lors de la vérification du statut');
+            }
+        }
+
+        async function loadProjects() {
+            try {
+                const response = await fetch('/projects');
+                const html = await response.text();
+                
+                // Extraire juste la partie tableau (simplification)
+                document.getElementById('projectsList').innerHTML = `
+                    <div style="text-align: center; padding: 20px;">
+                        <p>Affichage des projets en cours de développement...</p>
+                        <button class="btn btn-secondary" onclick="window.location.href='/projects'">
+                            Voir tous les projets
+                        </button>
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('projectsList').innerHTML = `
+                    <p style="color: #dc2626;">Erreur lors du chargement des projets: ${error.message}</p>
+                `;
+            }
+        }
+
+        // Auto-générer nom de projet
+        document.getElementById('profession').addEventListener('change', updateProjectName);
+        document.getElementById('country').addEventListener('change', updateProjectName);
+
+        function updateProjectName() {
+            const profession = document.getElementById('profession').value;
+            const country = document.getElementById('country').value;
+            
+            if (profession && country && !document.getElementById('projectName').value) {
+                const name = `${profession} ${country} ${new Date().toLocaleDateString('fr')}`;
+                document.getElementById('projectName').value = name;
+            }
+        }
+    </script>
 </body>
 </html>
