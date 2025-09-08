@@ -9,6 +9,49 @@ import json
 import importlib
 import os
 from datetime import datetime
+from typing import List, Dict, Any, Optional
+import logging
+from functools import lru_cache
+
+# ---------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------
+# jsonschema (validation sources)
+# ---------------------------------------------------------------------
+try:
+    import jsonschema  # type: ignore
+except ImportError:  # fallback doux si jsonschema absent
+    class _DummySchema:
+        @staticmethod
+        def validate(*args, **kwargs):
+            return None
+    jsonschema = _DummySchema()  # type: ignore
+
+SOURCES_SCHEMA: Dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["name", "categories"],
+        "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "base_url": {"type": "string"},
+            "categories": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["name", "url"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "url": {"type": "string", "format": "uri"}
+                    }
+                }
+            }
+        }
+    }
+}
 
 # --- Scrapers principaux ---
 # GenericScraper (fallback solide)
@@ -29,18 +72,98 @@ except ImportError:
             print("⚠️ SearchScraper non disponible, aucune URL trouvée via recherche")
             return []
 
+# ---------------------------------------------------------------------
+# Helper cache pour charger/valider les sources par pays
+# ---------------------------------------------------------------------
+@lru_cache(maxsize=32)
+def _load_sources_cached(country: str) -> List[dict]:
+    """Charge et valide les sources pour un pays, avec cache LRU (module-level)."""
+    sources_files = {
+        'Thaïlande': 'thailand_sources.json',
+        'France': 'france_sources.json',
+        'Expatriés Thaïlande': 'expat_thailand_sources.json',
+        'Digital Nomads Asie': 'nomads_asia_sources.json',
+        'Voyageurs Asie du Sud-Est': 'travelers_sea_sources.json',
+        'Royaume-Uni': 'uk_sources.json',
+        'États-Unis': 'usa_sources.json',
+        'Allemagne': 'germany_sources.json'
+    }
+
+    filename = sources_files.get(country, 'generic_sources.json')
+
+    base_dir = os.path.dirname(__file__)
+    possible_paths = [
+        os.path.join('sources', filename),
+        os.path.join('..', 'sources', filename),
+        os.path.join('.', 'sources', filename),
+        os.path.join(base_dir, 'sources', filename),
+    ]
+
+    for filepath in possible_paths:
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                # Validation stricte (si jsonschema dispo)
+                try:
+                    jsonschema.validate(data, SOURCES_SCHEMA)  # type: ignore
+                except Exception as e:
+                    print(f"❌ Sources invalides {filepath}: {e}")
+                    continue
+
+                print(f"📂 Sources validées: {filepath}")
+                return data  # type: ignore[list-item]
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON invalide {filepath}: {e}")
+            continue
+        except Exception as e:
+            print(f"❌ Erreur lecture {filepath}: {e}")
+            continue
+
+    # Si aucune source valide trouvée -> liste vide (laissera place aux defaults)
+    return []
+
 
 class ScrapingEngine:
     """Moteur principal de scraping modulaire"""
 
     def __init__(self):
         # Scrapers "métier" dynamiques
-        self.scrapers = {}
+        self.scrapers: Dict[str, Any] = {}
         self.load_scrapers()
 
         # Orchestrateurs clés
         self.generic = GenericScraper()
         self.searcher = SearchScraper()
+
+    # -----------------------------------------------------------------
+    # Normalisation robuste du projet
+    # -----------------------------------------------------------------
+    def _normalize_project_config(self, project) -> dict:
+        """Convertit project (tuple/Row/dict) en dict standardisé"""
+        if isinstance(project, dict):
+            return project.copy()
+
+        if hasattr(project, '_fields'):  # namedtuple
+            return project._asdict()
+
+        if isinstance(project, (tuple, list)):
+            # Mapping explicite avec defaults
+            fields = [
+                'id', 'name', 'profession', 'country', 'language',
+                'sources', 'status', 'created_at', 'last_run', 'total_results'
+            ]
+            result = {}
+            for i, field in enumerate(fields):
+                result[field] = project[i] if i < len(project) else None
+            return result
+
+        # sqlite3.Row (et assimilés)
+        if hasattr(project, 'keys'):
+            return dict(project)
+
+        raise TypeError(f"Type project non supporté: {type(project)}")
 
     def load_scrapers(self):
         """Charge tous les scrapers modulaires avec gestion d'erreur robuste"""
@@ -83,42 +206,22 @@ class ScrapingEngine:
     def run_scraping(self, project):
         """
         Orchestration principale.
-        1) Normalise le projet (tuple/dict) -> dict project_cfg
+        1) Normalise le projet (tuple/dict/Row) -> dict project_cfg
         2) Lance une recherche auto (SearchScraper) pour collecter des URLs cibles
         3) Construit des sources "consommables" par le GenericScraper
-        4) Fusionne avec d'éventuels seeds existants
-        5) Exécute le GenericScraper sur l'ensemble
+        4) Fusionne avec d'éventuels seeds existants + sources pays
+        5) Exécute le GenericScraper
         6) Valide et renvoie les résultats
         """
-
         # --- Normalisation du format project ---
-        if hasattr(project, '_fields') or isinstance(project, tuple):
-            # Tuple legacy: (id, name, profession, country, language, sources, status, created_at, last_run, total_results)
-            project_id, name, profession, country, language, sources, status, created_at, last_run, total_results = project[:10]
+        project_cfg = self._normalize_project_config(project)
+
+        # Si sources au format str -> JSON
+        if isinstance(project_cfg.get("sources"), str):
             try:
-                srcs = json.loads(sources) if isinstance(sources, str) else (sources or [])
+                project_cfg["sources"] = json.loads(project_cfg["sources"])
             except Exception:
-                srcs = []
-            project_cfg = {
-                "id": project_id,
-                "name": name,
-                "profession": profession,
-                "country": country,
-                "language": language,
-                "sources": srcs,
-                "status": status,
-                "created_at": created_at,
-                "last_run": last_run,
-                "total_results": total_results
-            }
-        else:
-            # Dict/Row
-            project_cfg = dict(project)
-            if isinstance(project_cfg.get("sources"), str):
-                try:
-                    project_cfg["sources"] = json.loads(project_cfg["sources"])
-                except Exception:
-                    project_cfg["sources"] = []
+                project_cfg["sources"] = []
 
         # --- Lecture des paramètres ---
         profession = (project_cfg.get("profession") or "").strip()
@@ -150,21 +253,18 @@ class ScrapingEngine:
             ]
         }]
 
-        # --- 3) Fusionner avec d'éventuelles sources existantes (seeds) ---
-        seeds = []
+        # --- 3) Fusionner avec d'éventuelles sources existantes (seeds) + sources pays ---
+        seeds: List[dict] = []
         if isinstance(srcs, list):
             seeds = srcs
         elif isinstance(srcs, dict) and srcs.get("seed_sources"):
             seeds = srcs["seed_sources"]
 
-        # pays -> sources par défaut (facultatif)
-        default_country_sources = self.load_sources(country) or []
+        # pays -> sources validées (cache)
+        validated_country_sources = _load_sources_cached(country) or []
 
-        # Priorité :
-        #   seeds (si fournis dans le projet)
-        # + default_country_sources (fichiers sources/…json)
-        # + search_sources (URLs issues de la recherche)
-        sources = (seeds or []) + (default_country_sources or [])
+        # Priorité : seeds + sources pays validées + search_sources
+        sources = (seeds or []) + (validated_country_sources or [])
         sources += search_sources
 
         # --- 4) Lancer le GenericScraper sur ces sources ---
@@ -179,7 +279,7 @@ class ScrapingEngine:
             print(f"❌ Erreur GenericScraper: {e}")
             raw_results = []
 
-        # --- 5) Validation / nettoyage ---
+        # --- 5) Validation / nettoyage stricts ---
         validated_results = self.validate_results(raw_results, cfg)
         print(f"🎯 Résultats validés: {len(validated_results)} résultats")
 
@@ -217,39 +317,14 @@ class ScrapingEngine:
         }
         return profession_mapping.get(profession, 'generic_scraper')
 
-    def load_sources(self, country):
-        """Charge les sources pour un pays donné (fichiers JSON optionnels)."""
-        sources_files = {
-            'Thaïlande': 'thailand_sources.json',
-            'France': 'france_sources.json',
-            'Expatriés Thaïlande': 'expat_thailand_sources.json',
-            'Digital Nomads Asie': 'nomads_asia_sources.json',
-            'Voyageurs Asie du Sud-Est': 'travelers_sea_sources.json',
-            'Royaume-Uni': 'uk_sources.json',
-            'États-Unis': 'usa_sources.json',
-            'Allemagne': 'germany_sources.json'
-        }
-
-        filename = sources_files.get(country, 'generic_sources.json')
-
-        possible_paths = [
-            f'sources/{filename}',
-            f'../sources/{filename}',
-            f'./sources/{filename}',
-            os.path.join(os.path.dirname(__file__), 'sources', filename)
-        ]
-
-        for filepath in possible_paths:
-            try:
-                if os.path.exists(filepath):
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        sources = json.load(f)
-                        print(f"📂 Sources chargées: {filepath}")
-                        return sources
-            except Exception as e:
-                print(f"⚠️ Erreur lecture {filepath}: {e}")
-                continue
-
+    # ---------------------------------------------------------------------
+    # Chargement sources (wrap vers cache)
+    # ---------------------------------------------------------------------
+    def load_sources(self, country: str) -> List[dict]:
+        """Charge sources avec cache et validation (via helper LRU)."""
+        data = _load_sources_cached(country)
+        if data:
+            return data
         print(f"📂 Utilisation sources par défaut pour: {country}")
         return self.get_default_sources(country)
 
@@ -303,41 +378,120 @@ class ScrapingEngine:
             ]
 
     # ---------------------------------------------------------------------
-    # Validation / nettoyage des résultats
+    # Validation / nettoyage des résultats (STRICT + LOGGING)
     # ---------------------------------------------------------------------
-    def validate_results(self, results, config):
-        """Post-traite et valide les résultats"""
-        validated = []
+    def validate_results(self, results: List[dict], config: dict) -> List[dict]:
+        """Valide et nettoie les résultats avec reporting détaillé"""
+        validated: List[dict] = []
+        stats = {
+            'total_input': len(results),
+            'skipped_not_dict': 0,
+            'skipped_no_name': 0,
+            'skipped_no_contact': 0,
+            'validated': 0
+        }
 
-        for result in results:
-            if not result or not isinstance(result, dict):
+        for i, result in enumerate(results):
+            if not isinstance(result, dict):
+                stats['skipped_not_dict'] += 1
+                logger.warning(f"Résultat #{i} ignoré: pas un dict", extra={"result_type": str(type(result))})
                 continue
 
-            name = result.get('name', '').strip()
+            name = (result.get('name') or '').strip()
             if not name or len(name) < 2:
+                stats['skipped_no_name'] += 1
+                logger.warning(f"Résultat #{i} ignoré: nom invalide", extra={"name": name})
                 continue
 
-            cleaned_result = {
-                'name': self.clean_text(name)[:500],
-                'category': self.clean_text(result.get('category', ''))[:200],
-                'description': self.clean_text(result.get('description', ''))[:2000],
-                'website': self.clean_url(result.get('website', '')),
-                'email': self.clean_email(result.get('email', '')),
-                'phone': self.clean_phone(result.get('phone', '')),
-                'city': self.clean_text(result.get('city', ''))[:200],
-                'country': result.get('country', config.get('country', '')),
-                'language': result.get('language', config.get('language', '')),
-                'source_url': self.clean_url(result.get('source_url', '')),
-                'profession': config.get('profession', ''),
-                'scraped_at': result.get('scraped_at', datetime.now().isoformat()),
-                'quality_score': result.get('quality_score', 5)
-            }
+            # Validation contact obligatoire
+            has_contact = any([
+                result.get('website'),
+                result.get('email'),
+                result.get('phone'),
+                result.get('facebook'),
+                result.get('whatsapp'),
+                (result.get('description') or '') and len(result.get('description', '')) > 50
+            ])
 
-            if self.is_valid_result(cleaned_result):
-                validated.append(cleaned_result)
+            if not has_contact:
+                stats['skipped_no_contact'] += 1
+                logger.warning(f"Résultat #{i} ignoré: aucun contact", extra={"name": name})
+                continue
 
+            # Nettoyage et normalisation
+            cleaned = self._clean_result(result, config)
+            validated.append(cleaned)
+            stats['validated'] += 1
+
+        logger.info("Validation résultats terminée", extra=stats)
         return validated
 
+    # --- Nettoyage unifié (utilise les helpers existants) ---
+    def _clean_result(self, r: dict, config: dict) -> dict:
+        name = self.clean_text((r.get('name') or ''))[:500]
+        description = self.clean_text((r.get('description') or ''))[:2000]
+        category = self.clean_text((r.get('category') or ''))[:200]
+
+        website = self.clean_url(r.get('website', ''))
+        email = self.clean_email(r.get('email', ''))
+        phone = self.clean_phone(r.get('phone', ''))
+
+        city = self.clean_text((r.get('city') or ''))[:200]
+        country = r.get('country') or config.get('country', '')
+        language = r.get('language') or config.get('language', '')
+
+        source_url = self.clean_url(r.get('source_url', ''))
+
+        # Socials / contacts additionnels (nettoyage léger)
+        facebook = self.clean_url(r.get('facebook', ''))
+        instagram = self.clean_url(r.get('instagram', ''))
+        linkedin = self.clean_url(r.get('linkedin', ''))
+        line_id = self.clean_text(r.get('line_id', ''))[:200]
+        whatsapp = self.clean_text(r.get('whatsapp', ''))[:200]
+        telegram = self.clean_url(r.get('telegram', ''))  # souvent URL
+        wechat = self.clean_text(r.get('wechat', ''))[:200]
+        other_contact = self.clean_text(r.get('other_contact', ''))[:200]
+        contact_name = self.clean_text(r.get('contact_name', ''))[:200]
+        province = self.clean_text(r.get('province', ''))[:200]
+        address = self.clean_text(r.get('address', ''))[:500]
+        latitude = self.clean_text(r.get('latitude', ''))[:100]
+        longitude = self.clean_text(r.get('longitude', ''))[:100]
+
+        cleaned = {
+            'name': name,
+            'category': category,
+            'description': description,
+            'website': website,
+            'email': email,
+            'phone': phone,
+            'city': city,
+            'country': country,
+            'language': language,
+            'source_url': source_url,
+            'profession': config.get('profession', ''),
+            'scraped_at': r.get('scraped_at', datetime.now().isoformat()),
+            'quality_score': r.get('quality_score', 5),
+
+            # Champs étendus (compat DB)
+            'facebook': facebook,
+            'instagram': instagram,
+            'linkedin': linkedin,
+            'line_id': line_id,
+            'whatsapp': whatsapp,
+            'telegram': telegram,
+            'wechat': wechat,
+            'other_contact': other_contact,
+            'contact_name': contact_name,
+            'province': province,
+            'address': address,
+            'latitude': latitude,
+            'longitude': longitude,
+        }
+        return cleaned
+
+    # ---------------------------------------------------------------------
+    # Helpers de nettoyage existants
+    # ---------------------------------------------------------------------
     def clean_text(self, text):
         """Nettoie un texte"""
         if not text:

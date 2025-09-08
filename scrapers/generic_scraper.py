@@ -6,9 +6,12 @@ import random
 import time
 import re
 from datetime import datetime
+from typing import List, Optional, Dict
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+import logging
 
 from utils.ua import pick_user_agent
 from utils.normalize import (
@@ -17,6 +20,13 @@ from utils.normalize import (
     extract_whatsapp, extract_line_id, extract_telegram, extract_wechat, find_contact_like_links
 )
 from utils.dedupe import fuzzy_duplicate
+
+logger = logging.getLogger(__name__)
+
+
+class PageNotFoundError(Exception):
+    """404 / page inexistante."""
+    pass
 
 
 class GenericScraper:
@@ -94,10 +104,7 @@ class GenericScraper:
                 time.sleep(1)  # Pause respectueuse (garde 1s ici)
 
         # Dédup finale (fuzzy)
-        deduped = []
-        for r in all_results:
-            if not fuzzy_duplicate(r, deduped, threshold=90):
-                deduped.append(r)
+        deduped = self._deduplicate_entries(all_results)
 
         print(f"🎯 Total: {len(deduped)} résultats (dédupliqués)")
         return deduped
@@ -131,119 +138,268 @@ class GenericScraper:
 
     # --------------------- Scraping par catégorie ---------------------
 
-    def scrape_category(self, base_url, category_name, config):
-        """
-        Scrape une catégorie/cible avec pagination adaptative.
-        - Si c'est un annuaire paginé (URL finit par '/', ou contient /cat-, /category, /page/),
-          on parcourt jusqu'à self.max_pages avec patron /{page}/index.html.
-        - Sinon, on traite la cible telle quelle (1 page).
-        """
-        results = []
+    # Remplacement total : détection intelligente de pagination
+    def scrape_category(self, base_url: str, category_name: str, config: dict) -> List[dict]:
+        """Scrape avec détection automatique du type de pagination"""
+        pagination_strategy = self._detect_pagination_strategy(base_url)
+        results: List[dict] = []
 
-        # Heuristique: annuaire paginé vs. homepage/fiche
-        is_directory = (
-            base_url.endswith("/") or
-            "/cat-" in base_url or "/category" in base_url or "/page/" in base_url
-        )
+        for page_num in range(1, self.max_pages + 1):
+            page_url = self._build_page_url(base_url, page_num, pagination_strategy)
+            if not page_url:
+                break
 
-        pages = range(1, self.max_pages + 1) if is_directory else range(1, 2)
-
-        for page in pages:
             try:
-                if is_directory:
-                    # Patron paginé (comme Thailand Guide)
-                    url = f"{base_url}{page}/index.html" if base_url.endswith("/") else f"{base_url}/{page}/index.html"
-                else:
-                    # Cible "simple": on ne touche pas à l'URL
-                    url = base_url
-
-                response = requests.get(url, headers=self.headers, timeout=10, proxies=self.proxies)
-                if response.status_code == 404:
-                    if page == 1:
-                        print("    ⭕ Catégorie/cible vide")
+                response = self._fetch_page(page_url)
+                if not response:
                     break
 
-                if response.status_code != 200:
-                    print(f"    ⚠️ HTTP {response.status_code} pour {url}")
-                    if not is_directory:
-                        break
-                    continue
+                page_results = self.extract_data_from_page(response.soup, page_url, category_name, config)
 
-                soup = BeautifulSoup(response.content, 'html.parser')
-                page_results = self.extract_data_from_page(soup, url, category_name, config)
-                if not page_results and not is_directory:
-                    print("    ⭕ Rien d'extractible sur la cible")
+                if not page_results and page_num == 1:
+                    # Première page vide = pas un annuaire paginé
+                    break
+                elif not page_results:
+                    # Page suivante vide = fin de pagination
                     break
 
-                # Dédup au fil de l’eau
-                for r in page_results:
-                    if not fuzzy_duplicate(r, results, threshold=90):
-                        results.append(r)
+                # Dédup au fil de l'eau
+                results.extend(self._deduplicate_entries(page_results, existing=results))
 
-                print(f"    📄 Page {page}: {len(page_results)} entrées (total {len(results)})")
-                time.sleep(self.delay_s + random.random()*0.4)
-
+            except PageNotFoundError:
+                break
             except Exception as e:
-                print(f"    ❌ Erreur page {page}: {str(e)[:120]}...")
-                if not is_directory:
-                    break
+                logger.warning("Erreur page", extra={"page": page_num, "url": page_url, "error": str(e)})
+                break
+
+            time.sleep(self.delay_s + random.random() * 0.4)
 
         return results
 
-    def extract_data_from_page(self, soup, source_url, category, config):
-        """Extrait les données d'une page 'annuaire' de manière robuste (ligne par ligne)."""
-        entries = []
+    def _detect_pagination_strategy(self, url: str) -> str:
+        """Détecte le type de pagination selon l'URL"""
+        url_lower = url.lower()
 
+        # Thailand Guide pattern
+        if "/cat-" in url_lower and url.endswith("/"):
+            return "thailand_guide"
+
+        # WordPress/standard pagination
+        if any(pattern in url_lower for pattern in ["/page/", "/category/", "/tag/"]):
+            return "wordpress"
+
+        # Query parameter pagination
+        if "?" in url:
+            return "query_param"
+
+        # Single page
+        return "single"
+
+    def _build_page_url(self, base_url: str, page_num: int, strategy: str) -> Optional[str]:
+        """Construit URL de page selon la stratégie détectée"""
+        if strategy == "thailand_guide":
+            return f"{base_url}{page_num}/index.html"
+
+        elif strategy == "wordpress":
+            if base_url.endswith("/"):
+                return f"{base_url}page/{page_num}/"
+            else:
+                return f"{base_url}/page/{page_num}/"
+
+        elif strategy == "query_param":
+            sep = "&" if "?" in base_url else "?"
+            return f"{base_url}{sep}page={page_num}"
+
+        else:  # single
+            return base_url if page_num == 1 else None
+
+    def _fetch_page(self, url: str):
+        """Télécharge une page et renvoie un objet avec soup."""
+        try:
+            resp = requests.get(url, headers=self.headers, timeout=10, proxies=self.proxies, allow_redirects=True)
+            if resp.status_code == 404:
+                raise PageNotFoundError()
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            return type("PageResponse", (), {"soup": soup, "status_code": resp.status_code})
+        except requests.exceptions.Timeout:
+            logger.debug("Timeout", extra={"url": url})
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.debug("Erreur requête", extra={"url": url, "error": str(e)})
+            return None
+
+    # --------------------- Extraction structurelle ---------------------
+
+    def extract_data_from_page(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
+        """Extraction basée sur la structure HTML"""
+        entries: List[dict] = []
+
+        extractors = [
+            self._extract_from_lists,      # <ul>, <ol> avec liens
+            self._extract_from_tables,     # <table> avec données
+            self._extract_from_cards,      # Divs avec classe card/item
+            self._extract_from_links,      # Tous les liens avec contexte
+            self._extract_from_text        # Fallback ligne par ligne
+        ]
+
+        for extractor in extractors:
+            try:
+                results = extractor(soup, source_url, category, config)
+                if results:
+                    entries.extend(results)
+                    logger.info("Extractor OK", extra={"name": extractor.__name__, "count": len(results)})
+                    break  # Premier extracteur qui fonctionne
+            except Exception as e:
+                logger.warning("Extractor échoué", extra={"name": extractor.__name__, "error": str(e)})
+                continue
+
+        return self._deduplicate_entries(entries)
+
+    def _extract_from_lists(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
+        """Extraction depuis listes HTML structurées"""
+        entries: List[dict] = []
+
+        for list_elem in soup.find_all(['ul', 'ol']):
+            items = list_elem.find_all('li', recursive=False) or list_elem.find_all('li')
+            if len(items) < 3:
+                continue
+
+            for item in items:
+                link = item.find('a')
+                if not link or not link.get('href'):
+                    continue
+
+                name = self._extract_clean_text(link)
+                if not self._is_valid_organization_name(name):
+                    continue
+
+                url = urljoin(source_url, link['href'])
+                description = self._extract_description_from_context(item, link)
+
+                entry = self.create_entry(
+                    name=name,
+                    website=url,
+                    description=description,
+                    category=category,
+                    source_url=source_url,
+                    config=config
+                )
+                entry = self.enrich_contacts(entry, config)
+                entries.append(entry)
+
+        return entries
+
+    def _extract_from_tables(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
+        """Extraction depuis tableaux"""
+        entries: List[dict] = []
+
+        for table in soup.find_all('table'):
+            rows = table.find_all('tr')
+            if len(rows) < 2:
+                continue
+
+            header_row = rows[0]
+            column_mapping = self._detect_table_columns(header_row)
+
+            for row in rows[1:]:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) < 2:
+                    continue
+
+                entry_data = self._extract_from_table_row(cells, column_mapping, source_url)
+                if entry_data and self._is_valid_organization_name(entry_data.get('name')):
+                    entry = self.create_entry(**entry_data, category=category, source_url=source_url, config=config)
+                    entry = self.enrich_contacts(entry, config)
+                    entries.append(entry)
+
+        return entries
+
+    def _extract_from_cards(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
+        """Extraction basée sur des cartes (div.card, .item, .listing etc.)"""
+        entries: List[dict] = []
+        selectors = [
+            ('div', {'class': re.compile(r'(card|result|item|listing)', re.I)}),
+            ('article', {}),
+        ]
+        for tag, attrs in selectors:
+            for card in soup.find_all(tag, attrs=attrs):
+                # Nom = texte d'un <h2>/<h3> ou 1er lien
+                title = card.find(['h1', 'h2', 'h3']) or card.find('a')
+                name = self._extract_clean_text(title) if title else None
+                if not self._is_valid_organization_name(name):
+                    continue
+
+                link = (title if title and title.name == 'a' else card.find('a'))
+                url = urljoin(source_url, link['href']) if link and link.get('href') else None
+                desc = self._extract_description_from_context(card, link or title)
+
+                entry = self.create_entry(
+                    name=name, website=url, description=desc,
+                    category=category, source_url=source_url, config=config
+                )
+                entry = self.enrich_contacts(entry, config)
+                entries.append(entry)
+        return entries
+
+    def _extract_from_links(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
+        """Extraction opportuniste via tous les liens pertinents"""
+        entries: List[dict] = []
+        for a in soup.find_all('a', href=True):
+            name = self._extract_clean_text(a)
+            if not self._is_valid_organization_name(name):
+                continue
+            href = urljoin(source_url, a['href'])
+            # éviter ancres / mailto / tel
+            if href.startswith('mailto:') or href.startswith('tel:') or href.endswith('#'):
+                continue
+
+            desc = self._extract_description_from_context(a.parent or soup, a)
+            entry = self.create_entry(name=name, website=href, description=desc,
+                                      category=category, source_url=source_url, config=config)
+            entry = self.enrich_contacts(entry, config)
+            entries.append(entry)
+        return entries
+
+    def _extract_from_text(self, soup: BeautifulSoup, source_url: str, category: str, config: dict) -> List[dict]:
+        """Fallback ligne par ligne (ton ancien comportement, affiné)."""
+        entries: List[dict] = []
         text = soup.get_text(separator="\n")
         lines = [line.strip() for line in text.split('\n') if line.strip()]
 
         i = 0
         while i < len(lines):
             line = lines[i]
-
-            # Nom d'organisation plausible ?
-            if self.is_valid_name(line):
+            if self._is_valid_organization_name(line):
                 website = ""
                 description = ""
 
-                # Chercher une URL dans les 5 lignes suivantes
+                # Chercher une URL proche
                 for j in range(i + 1, min(i + 6, len(lines))):
                     if j < len(lines) and self.is_url(lines[j]):
                         website = self.clean_url(lines[j])
 
-                        # Description dans les 7 lignes suivantes
                         desc_parts = []
                         for k in range(j + 1, min(j + 8, len(lines))):
                             if k < len(lines) and self.is_description(lines[k]):
                                 desc_parts.append(lines[k])
-                            elif (self.is_valid_name(lines[k]) or
+                            elif (self._is_valid_organization_name(lines[k]) or
                                   self.is_url(lines[k]) or
                                   len(desc_parts) > 3):
                                 break
                         description = ' '.join(desc_parts).strip()
                         break
 
-                # Filtrage (keywords optionnel) + règle mini
                 if self.matches_filters(line, description, config):
                     keep_incomplete = bool(config.get("keep_incomplete", True))
                     if website or len(description) > 15 or keep_incomplete:
                         entry = self.create_entry(
-                            name=line,
-                            website=website or None,
-                            description=description or None,
-                            category=category,
-                            source_url=source_url,
-                            config=config
+                            name=line, website=website or None, description=description or None,
+                            category=category, source_url=source_url, config=config
                         )
-                        # Enrichissement : emails multiples, téléphones E.164, réseaux, langue, ville…
                         entry = self.enrich_contacts(entry, config)
-
-                        # Dédup local
-                        if not fuzzy_duplicate(entry, entries, threshold=90):
-                            entries.append(entry)
-
+                        entries.append(entry)
             i += 1
-
         return entries
 
     # --------------------- Heuristiques & utilitaires ---------------------
@@ -260,35 +416,115 @@ class GenericScraper:
         return None
 
     def is_valid_name(self, text):
-        """Heuristique : ressemble à un nom d'organisation ?"""
-        if not text or len(text) < 3 or len(text) > 250:
+        """(Ancienne API) Heuristique : ressemble à un nom d'organisation ?"""
+        return self._is_valid_organization_name(text)
+
+    def _is_valid_organization_name(self, name: Optional[str]) -> bool:
+        """Validation stricte nom d'organisation"""
+        if not name or len(name.strip()) < 3 or len(name.strip()) > 250:
+            return False
+        s = name.strip()
+        exclusions = {
+            'home', 'accueil', 'back', 'retour', 'next', 'suivant', 'previous', 'précédent',
+            'menu', 'search', 'recherche', 'login', 'connexion', 'register', 'inscription',
+            'copyright', 'mentions légales', 'privacy policy', 'terms of service',
+            'contact us', 'nous contacter', 'about us', 'à propos',
+            'page', 'pages', 'results', 'résultats', 'total', 'showing', 'affichage',
+            'sort by', 'trier par', 'filter', 'filtrer', 'category', 'catégorie',
+            'today', "aujourd'hui", 'yesterday', 'hier', 'tomorrow', 'demain',
+            'monday', 'lundi', 'tuesday', 'mardi', 'wednesday', 'mercredi', 'thursday', 'jeudi',
+            'friday', 'vendredi', 'saturday', 'samedi', 'sunday', 'dimanche',
+            'one', 'two', 'three', 'un', 'deux', 'trois',
+        }
+        s_lower = s.lower()
+        if s_lower in exclusions:
             return False
 
-        # Exclusions navigation/footer
-        exclusions = [
-            'copyright', 'accueil', 'contact', 'mentions légales', 'top clics',
-            'signaler un problème', 'modifier', 'visites depuis le', 'nouveautés',
-            'nous contacter', 'proposer un site', 'filtrer les sites',
-            'circuits sur mesure', 'prix hors vols', "mesure d'audience",
-            'roi frequentation', 'voyage confidentiel'
+        bad_patterns = [
+            r'^\d+$',
+            r'^[^\w\s]+$',
+            r'^(page|p\.)\s*\d+',
+            r'^\d+\s*(results?|résultats?)',
+            r'^(show|afficher)\s+',
+            r'^(click|cliquer)\s+',
         ]
-        text_lower = text.lower()
-        if any(excl in text_lower for excl in exclusions):
-            return False
+        for pattern in bad_patterns:
+            if re.match(pattern, s_lower):
+                return False
 
-        # Doit contenir des lettres
-        if not re.search(r'[a-zA-Z\u00C0-\u024F\u0E00-\u0E7F]', text):
+        # Doit contenir au moins des lettres (latin étendu + thaï)
+        if not re.search(r'[a-zA-Z\u00C0-\u024F\u0E00-\u0E7F]', s):
             return False
 
         # Pas une URL
-        if text_lower.startswith(('www.', 'http', 'https', 'ftp')):
-            return False
-
-        # Pas que des chiffres/symboles
-        if re.match(r'^[0-9\s\-_.,;:!?]+$', text):
+        if s_lower.startswith(('www.', 'http', 'https', 'ftp')):
             return False
 
         return True
+
+    def _extract_clean_text(self, node) -> str:
+        if not node:
+            return ""
+        txt = " ".join(node.get_text(" ", strip=True).split())
+        return txt[:500]
+
+    def _extract_description_from_context(self, container, ref_node) -> str:
+        """Desc = texte voisin raisonnable autour de ref_node."""
+        if not container:
+            return ""
+        # prendre paragraphes proches
+        desc_parts = []
+        for p in container.find_all(['p', 'small'], limit=3):
+            t = self._extract_clean_text(p)
+            if 10 <= len(t) <= 500 and t.lower() not in ("read more", "en savoir plus"):
+                desc_parts.append(t)
+        # si rien, tenter texte du container
+        if not desc_parts:
+            t = self._extract_clean_text(container)
+            if 10 <= len(t) <= 500:
+                desc_parts.append(t)
+        return " ".join(desc_parts)[:1000]
+
+    def _detect_table_columns(self, header_row) -> Dict[int, str]:
+        """Détecte grossièrement les colonnes: name/website/description/phone/email"""
+        mapping: Dict[int, str] = {}
+        cells = header_row.find_all(['th', 'td'])
+        for idx, c in enumerate(cells):
+            h = (c.get_text(" ", strip=True) or "").lower()
+            if any(k in h for k in ['name', 'nom', 'organisation', 'company']):
+                mapping[idx] = 'name'
+            elif any(k in h for k in ['site', 'website', 'url', 'lien', 'link']):
+                mapping[idx] = 'website'
+            elif any(k in h for k in ['description', 'about', 'info', 'présentation']):
+                mapping[idx] = 'description'
+            elif 'email' in h:
+                mapping[idx] = 'email'
+            elif any(k in h for k in ['phone', 'téléphone', 'tel']):
+                mapping[idx] = 'phone'
+        return mapping
+
+    def _extract_from_table_row(self, cells, colmap: Dict[int, str], base_url: str) -> Optional[dict]:
+        data: Dict[str, Optional[str]] = {}
+        for idx, cell in enumerate(cells):
+            key = colmap.get(idx)
+            if not key:
+                continue
+            if key == 'website':
+                a = cell.find('a', href=True)
+                if a:
+                    data['website'] = urljoin(base_url, a['href'])
+                else:
+                    data['website'] = normalize_url(self._extract_clean_text(cell))
+            else:
+                data[key] = self._extract_clean_text(cell)
+        name = data.get('name') or ""
+        if not self._is_valid_organization_name(name):
+            return None
+        return {
+            "name": name,
+            "website": data.get("website"),
+            "description": data.get("description") or "",
+        }
 
     def is_url(self, text):
         """Heuristique : ressemble à une URL ?"""
@@ -308,7 +544,6 @@ class GenericScraper:
         """Heuristique : ligne de description plausible ?"""
         if not text or len(text) < 10 or len(text) > 1000:
             return False
-
         exclusions = [
             'visites depuis', 'signaler', 'modifier', 'copyright',
             'accueil', 'top clics', 'nouveautés', 'nous contacter',
@@ -317,7 +552,6 @@ class GenericScraper:
         text_lower = text.lower()
         if any(excl in text_lower for excl in exclusions):
             return False
-
         words = text.split()
         return len(words) >= 3
 
@@ -370,52 +604,143 @@ class GenericScraper:
             'profession': config.get('profession'),
             'scraped_at': datetime.now().isoformat(),
             'quality_score': self.calculate_quality_score(name, website, description),
-            # champ interne utile à la dédup
             'normalized_name': normalize_name(name or "")
         }
 
-    def enrich_contacts(self, entry, config):
-        """Renforce email/téléphone/réseaux/langue/ville à partir de la page du site + description."""
-        texts = [entry.get('description', '')]
+    # === NOUVELLE orchestration enrichissement (décomposée) ===
+    def enrich_contacts(self, entry: dict, config: dict) -> dict:
+        """Point d'entrée enrichissement - orchestration only"""
+        try:
+            entry = self._enrich_from_description(entry)
+            if entry.get('website'):
+                entry = self._enrich_from_website(entry, config)
+            entry = self._normalize_contact_fields(entry, config)
+            return entry
+        except Exception as e:
+            logger.warning("Erreur enrichissement contacts",
+                           extra={"name": entry.get('name'), "error": str(e)})
+            return entry
 
-        html = ""
-        # Récupérer le HTML de la home si un site est présent
-        if entry.get('website'):
-            html = self.http_get(entry['website'], timeout=8)
-            if html:
-                texts.append(html)
+    def _enrich_from_description(self, entry: dict) -> dict:
+        """Enrichit depuis description uniquement"""
+        desc = entry.get('description', '')
+        if not desc:
+            return entry
 
-        blob = " ".join(texts)
+        contact_data = {
+            'emails': extract_emails(desc),
+            'phones': extract_phones(desc),
+            'whatsapp': extract_whatsapp(desc),
+            'line_id': extract_line_id(desc),
+            'telegram': extract_telegram(desc),
+            'wechat': extract_wechat(desc),
+            'socials': extract_socials(desc)
+        }
 
-        # ---- Nom de contact (heuristique) ----
+        for field, values in contact_data.items():
+            if not values:
+                continue
+            if field == 'socials':
+                for platform, links in values.items():
+                    if links and not entry.get(platform):
+                        entry[platform] = links[0] if isinstance(links, list) else links
+            else:
+                if not entry.get(field):
+                    entry[field] = values[0] if isinstance(values, list) else values
+
+        # Nom de contact dans la description
         if not entry.get('contact_name'):
-            cn = self.extract_contact_name(blob)
+            cn = self.extract_contact_name(desc)
             if cn:
                 entry['contact_name'] = cn
 
-        # ---- Emails (tous, dédupliqués) ----
+        return entry
+
+    def _enrich_from_website(self, entry: dict, config: dict) -> dict:
+        """Enrichit depuis pages web avec timeout et retry (léger)"""
+        website = entry['website']
+
+        try:
+            main_content = self._fetch_page_content(website, timeout=8)
+            if main_content:
+                entry = self._extract_contacts_from_html(entry, main_content)
+
+            if main_content:
+                contact_pages = self._find_contact_pages(main_content, website)
+                for page_url in contact_pages[:3]:  # Max 3 pages
+                    try:
+                        page_content = self._fetch_page_content(page_url, timeout=5)
+                        if page_content:
+                            entry = self._extract_contacts_from_html(entry, page_content)
+                            if entry.get('email') and entry.get('phone'):
+                                break
+                    except Exception as e:
+                        logger.debug("Erreur page contact", extra={"url": page_url, "error": str(e)})
+                        continue
+                    time.sleep(0.5)
+
+        except Exception as e:
+            logger.warning("Erreur enrichissement website", extra={"website": website, "error": str(e)})
+
+        return entry
+
+    def _fetch_page_content(self, url: str, timeout: int = 10) -> Optional[str]:
+        """Récupère contenu page avec cache et gestion d'erreur"""
+        cache_key = f"page_{hash(url)}"
+        if hasattr(self, '_page_cache') and cache_key in getattr(self, '_page_cache', {}):
+            return self._page_cache[cache_key]
+
+        try:
+            response = requests.get(
+                url,
+                headers=self.headers,
+                timeout=timeout,
+                proxies=self.proxies,
+                allow_redirects=True
+            )
+            response.raise_for_status()
+            content = response.text
+
+            if not hasattr(self, '_page_cache'):
+                self._page_cache = {}
+            if len(self._page_cache) < 100:  # Limite cache
+                self._page_cache[cache_key] = content
+
+            return content
+
+        except requests.exceptions.Timeout:
+            logger.debug("Timeout", extra={"url": url})
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.debug("Erreur requête", extra={"url": url, "error": str(e)})
+            return None
+
+    def _extract_contacts_from_html(self, entry: dict, html: str) -> dict:
+        """Parse du HTML pour grappiller emails, phones, réseaux, nom de contact."""
+        blob = html or ""
+
+        # Emails
         emails = set(extract_emails(blob))
         if entry.get('email'):
             for e in str(entry['email']).replace(',', ';').split(';'):
                 e = e.strip()
                 if e:
                     emails.add(e)
-        entry['email'] = "; ".join(sorted(emails)) if emails else None
+        if emails:
+            entry['email'] = "; ".join(sorted(e for e in emails if e))
 
-        # ---- Téléphones (E.164 selon le pays) ----
+        # Phones
         raw_phones = extract_phones(blob)
-        if entry.get('phone'):
-            raw_phones.extend([p.strip() for p in str(entry['phone']).replace(',', ';').split(';') if p.strip()])
-        region = self.country_to_region(entry.get('country'))
-        phones_norm = normalize_phone_list(raw_phones, default_region=region)
-        entry['phone'] = "; ".join(phones_norm) if phones_norm else None
+        if raw_phones:
+            region = self.country_to_region(entry.get('country'))
+            phones_norm = normalize_phone_list(raw_phones, default_region=region)
+            merged = set((entry.get('phone') or "").replace(",", ";").split(";"))
+            for p in phones_norm:
+                merged.add(p)
+            merged_clean = sorted(x.strip() for x in merged if x and x.strip())
+            entry['phone'] = "; ".join(merged_clean) if merged_clean else entry.get('phone')
 
-        # >>> LOG OPTIONNEL : active avec SCRAPMASTER_DEBUG_CONTACTS=1
-        if os.getenv("SCRAPMASTER_DEBUG_CONTACTS", "0") == "1":
-            if entry.get('email') or entry.get('phone'):
-                print(f"    ✉️/📞 {entry.get('email') or '-'} | {entry.get('phone') or '-'}")
-
-        # ---- Canaux directs additionnels (WhatsApp / Line ID / Telegram / WeChat) ----
+        # Canaux directs
         if not entry.get('whatsapp'):
             wa = extract_whatsapp(blob)
             if wa:
@@ -433,7 +758,7 @@ class GenericScraper:
             if wc:
                 entry['wechat'] = "; ".join(wc)
 
-        # ---- Réseaux sociaux (liens) ----
+        # Réseaux sociaux
         socials = extract_socials(blob)
         if isinstance(socials, dict):
             for k, v in socials.items():
@@ -442,73 +767,78 @@ class GenericScraper:
                     if link:
                         entry[k] = normalize_url(link)
 
-        # ---- Suivre jusqu'à 5 pages "Contact/About/Legal" pour grappiller des contacts ----
-        extra_htmls = []
-        if entry.get('website') and html:
-            try:
-                for u in find_contact_like_links(html, entry['website'])[:5]:
-                    h = self.http_get(u, timeout=8)
-                    if h:
-                        extra_htmls.append(h)
-                    if len(extra_htmls) >= 5:
-                        break
-            except Exception:
-                pass
+        # Nom de contact supplémentaire
+        if not entry.get('contact_name'):
+            cn = self.extract_contact_name(blob)
+            if cn:
+                entry['contact_name'] = cn
 
-        if extra_htmls:
-            blob2 = " ".join(extra_htmls)
+        return entry
 
-            # Emails supplémentaires (sans écraser les existants)
-            more_emails = extract_emails(blob2)
-            if more_emails:
-                merged = set((entry.get('email') or "").replace(",", ";").split(";"))
-                for e in more_emails:
-                    merged.add(e)
-                merged_clean = sorted(x.strip() for x in merged if x and x.strip())
-                entry['email'] = "; ".join(merged_clean) if merged_clean else entry.get('email')
+    def _find_contact_pages(self, html: str, base_url: str) -> List[str]:
+        """Trouve des pages type contact/about/legal à partir d'un HTML existant (utilise aussi utilitaire)."""
+        urls = []
+        try:
+            urls = find_contact_like_links(html, base_url) or []
+        except Exception:
+            pass
 
-            # Phones supplémentaires
-            more_phones = extract_phones(blob2)
-            if more_phones:
-                region = self.country_to_region(entry.get('country'))
-                phones_norm2 = normalize_phone_list(more_phones, default_region=region)
-                if phones_norm2:
-                    merged = set((entry.get('phone') or "").replace(",", ";").split(";"))
-                    for p in phones_norm2:
-                        merged.add(p)
-                    merged_clean = sorted(x.strip() for x in merged if x and x.strip())
-                    entry['phone'] = "; ".join(merged_clean) if merged_clean else entry.get('phone')
+        # Ajouts courants si non présents
+        common = ["contact", "about", "a-propos", "contacts", "legal", "mentions", "imprint"]
+        for c in common:
+            candidate = urljoin(base_url, f"/{c}")
+            if candidate not in urls:
+                urls.append(candidate)
+        # normaliser
+        return [normalize_url(u) for u in urls if u]
 
-            # Canaux directs si toujours vides
-            if not entry.get('whatsapp'):
-                wa2 = extract_whatsapp(blob2)
-                if wa2:
-                    entry['whatsapp'] = "; ".join(wa2)
-            if not entry.get('line_id'):
-                li2 = extract_line_id(blob2)
-                if li2:
-                    entry['line_id'] = "; ".join(li2)
-            if not entry.get('telegram'):
-                tg2 = extract_telegram(blob2)
-                if tg2:
-                    entry['telegram'] = "; ".join(tg2)
-            if not entry.get('wechat'):
-                wc2 = extract_wechat(blob2)
-                if wc2:
-                    entry['wechat'] = "; ".join(wc2)
+    def _normalize_contact_fields(self, entry: dict, config: dict) -> dict:
+        """Normalisation finale avec validation stricte"""
+        # Téléphones en E.164
+        if entry.get('phone'):
+            region = self.country_to_region(config.get('country'))
+            phones = normalize_phone_list([p for p in (entry['phone'].replace(",", ";").split(";")) if p], default_region=region)
+            entry['phone'] = "; ".join(phones) if phones else None
 
-        # ---- Langue (si inconnue) ----
-        if not entry.get('language') or entry['language'] == 'unknown':
-            entry['language'] = detect_lang(blob, entry.get('website')) or entry.get('language') or 'unknown'
+        # Validation emails
+        if entry.get('email'):
+            emails = extract_emails(entry['email'])
+            entry['email'] = "; ".join(sorted(set(emails))) if emails else None
 
-        # ---- Ville (normalisation légère) ----
+        # URLs normalisées
+        for field in ['website', 'facebook', 'instagram', 'linkedin']:
+            if entry.get(field):
+                normalized = normalize_url(entry[field])
+                entry[field] = normalized
+
+        # Détection langue finale
+        text_for_detection = f"{entry.get('name', '')} {entry.get('description', '')}"
+        detected_lang = detect_lang(text_for_detection, entry.get('website'))
+        if detected_lang:
+            entry['language'] = detected_lang
+
+        # Ville normalisée
         if entry.get('city'):
             entry['city'] = normalize_location(entry['city'])
 
-        # ---- Nom normalisé (utile à la dédup) ----
+        # Nom normalisé
         entry['normalized_name'] = normalize_name(entry.get('name') or "")
 
         return entry
+
+    # --------------------- Déduplication ---------------------
+
+    def _deduplicate_entries(self, items: List[dict], existing: Optional[List[dict]] = None, threshold: int = 90) -> List[dict]:
+        """Déduplique avec fuzzy_duplicate contre une liste en cours (existing) et localement."""
+        out: List[dict] = list(existing) if existing is not None else []
+        base = out[:] if existing is not None else []
+        for r in (items if existing is None else items):
+            if not fuzzy_duplicate(r, base, threshold=threshold):
+                out.append(r)
+                base.append(r)
+        return out if existing is None else out[len(existing):] if existing is not None else out
+
+    # --------------------- Score ---------------------
 
     def calculate_quality_score(self, name, website, description):
         """Calcule un score de qualité 1..10 (heuristique simple)."""

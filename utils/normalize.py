@@ -1,5 +1,5 @@
 import re, unicodedata, urllib.parse
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from urllib.parse import urljoin  # pour find_contact_like_links
 
 # Optional deps (graceful fallback)
@@ -22,31 +22,75 @@ HIRAGANA_KATAKANA_RE = re.compile(r'[\u3040-\u30FF]')
 HANGUL_RE = re.compile(r'[\uAC00-\uD7AF]')
 DEVANAGARI_RE = re.compile(r'[\u0900-\u097F]')
 
-# ---- AJOUT : motifs & extracteurs WhatsApp / Line ID / Telegram / WeChat ----
-WA_RE = re.compile(r'(?:wa\.me|api\.whatsapp\.com)[^\d+]*(\+?\d[\d\s().\-]{6,}\d)', re.I)
-LINE_ID_RE = re.compile(r'(?:line\s*id[:\s]*)([A-Za-z0-9_.\-]{3,})', re.I)
-TG_ID_RE = re.compile(r'(?:t\.me/)([A-Za-z0-9_]{3,})', re.I)
-WECHAT_ID_RE = re.compile(r'(?:wechat|weixin)[:\s\-]*([A-Za-z0-9_\-]{3,})', re.I)
+# ---- REGEX STRICTS (remplacement des anciens motifs trop permissifs) ----
+# WhatsApp : liens seulement, pas les numéros dans le texte libre
+WA_LINK_RE = re.compile(r'(?:https?://)?(?:wa\.me|api\.whatsapp\.com)/(\+?\d{7,15})', re.I)
 
+# Line ID : format officiel (4-20, lettres/chiffres/._-), tolère "line id:"
+LINE_ID_RE = re.compile(r'(?:^|[\s,])(?:line\s*id\s*[:\-]?\s*)(@?[a-z0-9_.-]{4,20})(?=[\s,.]|$)', re.I | re.M)
+
+# Telegram : username format officiel (5-32, lettres/chiffres/_), supporte @username ou t.me/username
+TG_USERNAME_RE = re.compile(r'(?:^|[\s,])(?:@|t\.me/)([a-z0-9_]{5,32})(?=[\s,.]|$)', re.I | re.M)
+
+# WeChat : format ID officiel (6-20, lettres/chiffres/_-), tolère "wechat id:"
+WECHAT_ID_RE = re.compile(r'(?:^|[\s,])(?:wechat\s*id\s*[:\-]?\s*)([a-z0-9_-]{6,20})(?=[\s,.]|$)', re.I | re.M)
+
+
+# -------------------- EXTRACTEURS CONTACT --------------------
 def extract_whatsapp(text: Optional[str]) -> List[str]:
+    """Extrait liens WhatsApp uniquement (pas numéros libres) avec validation stricte."""
     if not text:
         return []
-    return sorted(set(x.strip() for x in WA_RE.findall(text)))
+    matches = WA_LINK_RE.findall(text)
+    valid_numbers: Set[str] = set()
+    for m in matches:
+        # Exiger format international clair (+) et taille correcte
+        digits = m.replace('+', '')
+        if m.startswith('+') and 7 <= len(digits) <= 15 and digits.isdigit():
+            valid_numbers.add(m)
+    return sorted(valid_numbers)
+
 
 def extract_line_id(text: Optional[str]) -> List[str]:
+    """Extrait Line ID avec validation format et nettoyage (@ facultatif)."""
     if not text:
         return []
-    return sorted(set(x.strip() for x in LINE_ID_RE.findall(text)))
+    matches = LINE_ID_RE.findall(text)
+    valid_ids: Set[str] = set()
+    for m in matches:
+        clean_id = m.strip().lstrip('@').lower()
+        if 4 <= len(clean_id) <= 20 and re.fullmatch(r'[a-z0-9_.-]+', clean_id):
+            # éviter des URLs déguisées
+            if not clean_id.startswith(('http', 'www')):
+                valid_ids.add(clean_id)
+    return sorted(valid_ids)
+
 
 def extract_telegram(text: Optional[str]) -> List[str]:
+    """Extrait usernames Telegram (@user ou t.me/user) avec validation officielle (5-32)."""
     if not text:
         return []
-    return sorted(set(x.strip() for x in TG_ID_RE.findall(text)))
+    matches = TG_USERNAME_RE.findall(text)
+    valid: Set[str] = set()
+    for m in matches:
+        user = m.lower()
+        if 5 <= len(user) <= 32 and re.fullmatch(r'[a-z0-9_]+', user):
+            valid.add(user)
+    return sorted(valid)
+
 
 def extract_wechat(text: Optional[str]) -> List[str]:
+    """Extrait WeChat IDs (6-20, lettres/chiffres/_-), via mentions explicites."""
     if not text:
         return []
-    return sorted(set(x.strip() for x in WECHAT_ID_RE.findall(text)))
+    matches = WECHAT_ID_RE.findall(text)
+    valid: Set[str] = set()
+    for m in matches:
+        w = m.lower()
+        if 6 <= len(w) <= 20 and re.fullmatch(r'[a-z0-9_-]+', w):
+            valid.add(w)
+    return sorted(valid)
+
 
 def normalize_url(url: Optional[str]) -> Optional[str]:
     if not url:
@@ -71,6 +115,7 @@ def normalize_url(url: Optional[str]) -> Optional[str]:
         pass
     return url
 
+
 def _tld_lang_hint(netloc: str) -> Optional[str]:
     netloc = netloc.lower()
     if netloc.endswith(".th"): return "th"
@@ -85,33 +130,55 @@ def _tld_lang_hint(netloc: str) -> Optional[str]:
     if netloc.endswith(".cn"): return "zh"
     return None
 
+
+# -------------------- DÉTECTION LANGUE AMÉLIORÉE --------------------
 def detect_language(text: Optional[str], url: Optional[str] = None) -> Optional[str]:
-    t = (text or "").strip()
-    # Script-based quick wins
-    if THAI_RE.search(t): return "th"
-    if CYRILLIC_RE.search(t): return "ru"
-    if ARABIC_RE.search(t): return "ar"
-    if HEBREW_RE.search(t): return "he"
-    if HIRAGANA_KATAKANA_RE.search(t): return "ja"
-    if HANGUL_RE.search(t): return "ko"
-    if CJK_RE.search(t): return "zh"
-    if DEVANAGARI_RE.search(t): return "hi"
-    # TLD hint
+    """Détection langue basée sur des seuils de scripts + indice TLD + fallback langdetect."""
+    if not text or len(text.strip()) < 10:
+        return None
+
+    t = text.strip()
+    text_length = len(t)
+
+    # Compter caractères par script
+    thai_chars = len(THAI_RE.findall(t))
+    cyrillic_chars = len(CYRILLIC_RE.findall(t))
+    arabic_chars = len(ARABIC_RE.findall(t))
+    cjk_chars = len(CJK_RE.findall(t))
+    hiragana_katakana_chars = len(HIRAGANA_KATAKANA_RE.findall(t))
+
+    # 20% du texte ou minimum 5 caractères
+    threshold = max(5, int(text_length * 0.2))
+
+    if thai_chars >= threshold:
+        return "th"
+    if hiragana_katakana_chars >= threshold:
+        return "ja"
+    if cyrillic_chars >= threshold:
+        return "ru"
+    if arabic_chars >= threshold:
+        return "ar"
+    if cjk_chars >= threshold:
+        return "zh"
+
+    # Fallback TLD si pas de script dominant
     if url:
         try:
-            netloc = urllib.parse.urlsplit(url).netloc
-            hint = _tld_lang_hint(netloc)
-            if hint: return hint
+            tld_hint = _tld_lang_hint(urllib.parse.urlsplit(url).netloc)
+            if tld_hint:
+                return tld_hint
         except Exception:
             pass
-    # Fallback lightweight detector
-    if detect:
+
+    # Détecteur externe en dernier recours (texte suffisamment long pour fiabilité)
+    if detect and text_length >= 50:
         try:
-            code = detect(t)
-            return code
+            return detect(t)
         except Exception:
-            return None
-    return None
+            pass
+
+    return None  # Incertain plutôt que faux
+
 
 def _clean_obfuscations(s: str) -> str:
     s = s.replace("[at]", "@").replace("(at)", "@").replace(" at ", "@")
@@ -119,8 +186,10 @@ def _clean_obfuscations(s: str) -> str:
     s = s.replace(" ", " ").replace("\u200b", "")  # nbsp, zero width
     return s
 
+
 EMAIL_RE = re.compile(r'[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}', re.I)
 PHONE_RE = re.compile(r'(\+?\d[\d\s().-]{6,}\d)')
+
 
 def extract_emails(text: Optional[str]) -> List[str]:
     if not text: return []
@@ -128,9 +197,11 @@ def extract_emails(text: Optional[str]) -> List[str]:
     found = set(re.findall(EMAIL_RE, t))
     return sorted(found)
 
+
 def extract_phones(text: Optional[str]) -> List[str]:
     if not text: return []
     return re.findall(PHONE_RE, text)
+
 
 def normalize_phone_list(values: List[str], default_region: str = "TH") -> List[str]:
     out = []
@@ -158,6 +229,7 @@ def normalize_phone_list(values: List[str], default_region: str = "TH") -> List[
             uniq.append(x)
     return uniq
 
+
 SOCIAL_PATTERNS = {
     "facebook": r'(?:https?://)?(?:www\.)?facebook\.com/[A-Za-z0-9_.\-/%?=&#]+',
     "instagram": r'(?:https?://)?(?:www\.)?instagram\.com/[A-Za-z0-9_.\-/%?=&#]+',
@@ -166,9 +238,10 @@ SOCIAL_PATTERNS = {
     "telegram": r'(?:https?://)?t\.me/[A-Za-z0-9_.\-/%?=&#]+',
     "wechat": r'(?:https?://)?weixin\.qq\.com/[A-Za-z0-9_.\-/%?=&#]+',
     "youtube": r'(?:https?://)?(?:www\.)?youtube\.com/[A-Za-z0-9_.\-/%?=&#]+',
-    # ---- AJOUT : motif WhatsApp (liens) ----
+    # WhatsApp liens uniquement (cohérent avec extract_whatsapp)
     "whatsapp": r'(?:https?://)?(?:wa\.me|api\.whatsapp\.com)/[A-Za-z0-9_.\-/%?=&#]+',
 }
+
 
 def extract_socials(text: Optional[str]) -> Dict[str, List[str]]:
     out = {k: [] for k in SOCIAL_PATTERNS}
@@ -179,6 +252,7 @@ def extract_socials(text: Optional[str]) -> Dict[str, List[str]]:
         out[key] = sorted(set(hits))
     return out
 
+
 def normalize_name(name: Optional[str]) -> Optional[str]:
     if not name:
         return None
@@ -186,6 +260,7 @@ def normalize_name(name: Optional[str]) -> Optional[str]:
     n = re.sub(r'\s+', ' ', n)
     n = re.sub(r'[^\w\s\u0E00-\u0E7F-]', '', n)  # keep thai script, words, dash
     return n or None
+
 
 # Minimal location normalization (Thai provinces aliases)
 TH_PROVINCES = {
@@ -199,6 +274,7 @@ TH_PROVINCES = {
     "udon thani": {"th": "อุดรธานี", "en": "Udon Thani"},
 }
 
+
 def normalize_location(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
@@ -208,7 +284,8 @@ def normalize_location(s: Optional[str]) -> Optional[str]:
             return data["en"]
     return s
 
-# ---- AJOUT : repérage des pages “Contact / About / Mentions / Legal” ----
+
+# ---- repérage des pages “Contact / About / Mentions / Legal” ----
 def find_contact_like_links(html: str, base_url: str) -> list:
     """
     Retourne une liste d'URLs (absolues) pointant vers des pages de type Contact/About/Impressum/Mentions/Légal.

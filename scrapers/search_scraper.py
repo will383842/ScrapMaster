@@ -1,8 +1,13 @@
 # scrapers/search_scraper.py
-import os, re, time, html, random
+import os, re, time, html as _html, random, logging
+from typing import List
+import urllib.parse
 from urllib.parse import quote_plus
 import requests
+
 from utils.ua import pick_user_agent
+
+logger = logging.getLogger(__name__)
 
 # Petits vocabulaires multilingues pour booster la recherche
 _LANG_CONTACT_WORDS = {
@@ -25,6 +30,7 @@ def _kw_bundle(language: str):
     base = _LANG_CONTACT_WORDS.get(lang, _LANG_CONTACT_WORDS["en"])
     # toujours garder quelques génériques
     return list(dict.fromkeys(base + ["official site", "association", "directory", "impressum", "legal"]))
+
 
 class SearchScraper:
     """
@@ -58,109 +64,290 @@ class SearchScraper:
     # ---------------- Core API ----------------
 
     def search(self, profession: str, country: str, language: str, extra_keywords: str = "") -> list:
-        """
-        Construit plusieurs requêtes (dorks) multilingues et interroge DDG + Bing HTML.
-        Retourne jusqu'à ~200 URLs nettoyées/dédupliquées.
-        """
-        prof = (profession or "").strip()
-        ctry = (country or "").strip()
-        lang = (language or "en").strip().lower()
+        """Recherche sécurisée avec validation et échappement"""
+        # Validation stricte des entrées
+        profession = self._sanitize_search_term(profession)
+        country = self._sanitize_search_term(country)
+        language = self._sanitize_search_term(language)
+        extra_keywords = self._sanitize_search_term(extra_keywords)
 
-        # Bundle mots de contact pour la langue
-        contact_words = _kw_bundle(lang)
+        if not profession or not country:
+            logger.warning("Paramètres recherche insuffisants",
+                           extra={"profession": profession, "country": country})
+            return []
 
-        # Extra keywords (ex: "immigration; expat; visa")
-        extra = []
-        if extra_keywords:
-            extra = [k.strip() for k in extra_keywords.replace(",", ";").split(";") if k.strip()]
-
-        # Dorks/variantes de recherche
-        base_q = " ".join([x for x in [prof, ctry] if x]).strip()
-        queries = [
-            base_q,
-            f"{base_q} " + " ".join(contact_words[:2]),
-            f"{base_q} " + " ".join(contact_words[:3]),
-            f"{base_q} email contact site:*.org",
-            f"{base_q} {contact_words[1]} site:*.gov",
-            f"{base_q} directory listing email",
+        # Construction sécurisée
+        contact_words = _kw_bundle(language)
+        query_templates = [
+            "{profession} {country}",
+            "{profession} {country} {contact_word1} {contact_word2}",
+            "{profession} {country} email contact",
+            "{profession} {country} directory association",
+            "{profession} {country} {contact_word1} site:*.org",
+            "{profession} {country} {contact_word1} site:*.gov",
         ]
-        # Ajout des extras
-        if extra:
-            queries += [f"{base_q} {' '.join(extra)}", f"{base_q} {' '.join(extra)} email contact"]
 
-        urls = []
-
-        # Interroger DuckDuckGo HTML
-        for q in queries:
-            urls.extend(self._ddg_query(q, max_pages=self.max_pages))
-            time.sleep(self.delay_s + random.random() * 0.4)
-
-        # Interroger Bing HTML (fallback, sans clé)
-        for q in queries:
-            urls.extend(self._bing_query(q, max_pages=self.max_pages))
-            time.sleep(self.delay_s + random.random() * 0.4)
-
-        # Nettoyage & filtrage
-        cleaned = self._clean_urls(urls)
-        return cleaned[:200]
-
-    # ---------------- Engines ----------------
-
-    def _ddg_query(self, q: str, max_pages=2):
-        """Scraping DuckDuckGo HTML: POST /html avec param q, extraire <a class="result__a">."""
-        out = []
-        for p in range(max_pages):
+        queries: List[str] = []
+        for template in query_templates:
             try:
-                params = {"q": q, "s": str(p * 50)}
-                r = requests.post(self.ddg_base, data=params, headers=self.headers,
-                                  timeout=12, proxies=self.proxies)
-                r.raise_for_status()
-                html_text = r.text
+                q = template.format(
+                    profession=profession,
+                    country=country,
+                    contact_word1=contact_words[0] if contact_words else "contact",
+                    contact_word2=contact_words[1] if len(contact_words) > 1 else "email"
+                )
+                # Ajout mots-clés extra sécurisés
+                if extra_keywords:
+                    q = f"{q} {extra_keywords}"
 
-                for m in re.finditer(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"', html_text, flags=re.I):
-                    u = html.unescape(m.group(1)).strip()
-                    if u and not u.startswith("http://r.duckduckgo.com"):
-                        out.append(u)
-            except Exception:
-                pass
-        return out
+                # Validation finale longueur
+                if 5 <= len(q) <= 200:
+                    queries.append(q)
+            except (KeyError, IndexError) as e:
+                logger.warning("Erreur template query", extra={"template": template, "error": str(e)})
+                continue
 
-    def _bing_query(self, q: str, max_pages=2):
-        """Scraping Bing HTML: GET /search?q= ...; extraire href="https://..." (en filtrant bing.com)."""
-        out = []
-        for p in range(max_pages):
+        # Exécution avec rate limiting & retry
+        urls = self._execute_searches(queries)
+        return urls[:200]
+
+    # ---------------- Validation & orchestration ----------------
+
+    def _sanitize_search_term(self, term: str) -> str:
+        """Nettoie et valide un terme de recherche"""
+        if not term:
+            return ""
+        term = term.strip()
+
+        # Enlever caractères dangereux
+        for ch in ['<', '>', '"', "'", '&', ';', '|', '`', '$']:
+            term = term.replace(ch, ' ')
+
+        # Normaliser espaces
+        term = re.sub(r'\s+', ' ', term).strip()
+        # Limite longueur
+        return term[:100]
+
+    def _execute_searches(self, queries: List[str]) -> List[str]:
+        """Exécute recherches avec rate limiting et retry"""
+        all_urls: List[str] = []
+
+        for i, query in enumerate(queries):
             try:
-                qp = f"{q} site:*/contact OR site:*/about OR annuaire"
-                if p > 0:
-                    qp += f" &first={p*10+1}"
+                # DuckDuckGo
+                ddg_urls = self._ddg_query_safe(query, max_pages=self.max_pages)
+                all_urls.extend(ddg_urls)
+
+                # Rate limiting intelligent entre moteurs
+                if i < len(queries) - 1:
+                    delay = self.delay_s + random.uniform(0.5, 1.5)
+                    time.sleep(delay)
+                else:
+                    delay = self.delay_s
+
+                # Bing
+                bing_urls = self._bing_query_safe(query, max_pages=self.max_pages)
+                all_urls.extend(bing_urls)
+
+                if i < len(queries) - 1:
+                    time.sleep(delay)
+
+            except Exception as e:
+                logger.warning("Erreur recherche query", extra={"query": query, "error": str(e)})
+                continue
+
+        return self._clean_and_validate_urls(all_urls)
+
+    # ---------------- Engines (robustes) ----------------
+
+    def _ddg_query_safe(self, query: str, max_pages: int = 2) -> List[str]:
+        """DuckDuckGo avec gestion d'erreur robuste"""
+        urls: List[str] = []
+
+        for page in range(max_pages):
+            try:
+                headers = self.headers.copy()
+                if os.getenv("SCRAPMASTER_UA_ROTATION", "true").lower() == "true":
+                    headers['User-Agent'] = pick_user_agent()
+
+                params = {
+                    "q": query[:500],  # Limite longueur
+                    "s": str(page * 50)
+                }
+
+                response = requests.post(
+                    self.ddg_base,
+                    data=params,
+                    headers=headers,
+                    timeout=15,
+                    proxies=self.proxies
+                )
+
+                if response.status_code == 429:  # Rate limited
+                    logger.warning("DDG rate limit atteint", extra={"query": query})
+                    time.sleep(30)
+                    continue
+                elif response.status_code == 403:
+                    logger.warning("DDG access bloqué", extra={"query": query})
+                    break
+
+                response.raise_for_status()
+
+                page_urls = self._extract_ddg_results(response.text, query)
+
+                if not page_urls and page == 0:
+                    logger.info("DDG: aucun résultat", extra={"query": query})
+                    break
+                elif not page_urls:
+                    logger.debug("DDG: page vide", extra={"page": page + 1, "query": query})
+                    break
+
+                urls.extend(page_urls)
+
+                if page < max_pages - 1:
+                    time.sleep(random.uniform(2, 4))
+
+            except requests.exceptions.Timeout:
+                logger.warning("DDG timeout", extra={"page": page + 1, "query": query})
+                break
+            except requests.exceptions.RequestException as e:
+                logger.warning("DDG erreur", extra={"page": page + 1, "query": query, "error": str(e)})
+                break
+            except Exception as e:
+                logger.error("DDG erreur inattendue", extra={"query": query, "error": str(e)})
+                break
+
+        return urls
+
+    def _extract_ddg_results(self, html: str, query: str) -> List[str]:
+        """Extraction robuste résultats DDG"""
+        urls: List[str] = []
+
+        patterns = [
+            r'<a[^>]+class="result__a"[^>]+href="([^"]+)"',            # Standard
+            r'<a[^>]+href="([^"]+)"[^>]*class="result__a"',            # Ordre inversé
+            r'data-testid="result-title-a"[^>]+href="([^"]+)"',        # Nouveau format
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, html, flags=re.I)
+            for match in matches:
+                try:
+                    url = _html.unescape(match).strip()
+                    # Filtrer redirections DDG
+                    if "duckduckgo.com" in url:
+                        continue
+                    if self._is_valid_search_result(url, query):
+                        urls.append(url)
+                except Exception as e:
+                    logger.debug("Erreur parsing URL DDG", extra={"url": match, "error": str(e)})
+                    continue
+
+        # Dédup en préservant l'ordre
+        deduped = list(dict.fromkeys(urls))
+        return deduped
+
+    def _bing_query_safe(self, query: str, max_pages: int = 2) -> List[str]:
+        """Scraping Bing HTML avec durcissement (codes d'erreur, rotation UA, pagination)"""
+        out: List[str] = []
+
+        for page in range(max_pages):
+            try:
+                headers = self.headers.copy()
+                if os.getenv("SCRAPMASTER_UA_ROTATION", "true").lower() == "true":
+                    headers['User-Agent'] = pick_user_agent()
+
+                qp = f"{query} site:*/contact OR site:*/about OR annuaire"
                 url = self.bing_base + quote_plus(qp)
-                r = requests.get(url, headers=self.headers, timeout=12, proxies=self.proxies)
+                if page > 0:
+                    # Pagination Bing: &first=11, 21, ...
+                    url += f"&first={page*10+1}"
+
+                r = requests.get(url, headers=headers, timeout=15, proxies=self.proxies, allow_redirects=True)
+
+                if r.status_code == 429:
+                    logger.warning("Bing rate limit atteint", extra={"query": query})
+                    time.sleep(20)
+                    continue
+                elif r.status_code == 403:
+                    logger.warning("Bing access bloqué", extra={"query": query})
+                    break
+
                 r.raise_for_status()
-                # Liens externes
+
                 hits = re.findall(r'href="(https?://[^"]+)"', r.text, flags=re.I)
                 for u in hits:
                     if "bing.com" in u.lower():
                         continue
-                    out.append(u)
-            except Exception:
-                pass
+                    if self._is_valid_search_result(u, query):
+                        out.append(u)
+
+                if page < max_pages - 1:
+                    time.sleep(random.uniform(2, 4))
+
+            except requests.exceptions.Timeout:
+                logger.warning("Bing timeout", extra={"page": page + 1, "query": query})
+                break
+            except requests.exceptions.RequestException as e:
+                logger.warning("Bing erreur", extra={"page": page + 1, "query": query, "error": str(e)})
+                break
+            except Exception as e:
+                logger.error("Bing erreur inattendue", extra={"query": query, "error": str(e)})
+                break
+
         return out
 
     # ---------------- Helpers ----------------
 
-    def _clean_urls(self, urls: list) -> list:
-        """Déduplique et filtre les URLs bruyantes (login, pdf, tracking)."""
+    def _is_valid_search_result(self, url: str, query: str) -> bool:
+        """Valide qu'une URL est un bon résultat de recherche"""
+        bad_domains = {
+            'google.com', 'bing.com', 'yahoo.com', 'duckduckgo.com',
+            'facebook.com', 'twitter.com', 'instagram.com', 'linkedin.com',
+            'youtube.com', 'wikipedia.org'
+        }
+        try:
+            parsed = urllib.parse.urlparse(url)
+            domain = (parsed.netloc or "").lower()
+            if domain.startswith('www.'):
+                domain = domain[4:]
+
+            if not domain or domain in bad_domains:
+                return False
+
+            # Filtrer documents lourds / non-HTML
+            if parsed.path.lower().endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx')):
+                return False
+
+            # Éviter d'autres pages de résultats
+            u_lower = url.lower()
+            if any(word in u_lower for word in ['search?', 'results?', 'query=', '/search/']):
+                return False
+
+            # Longueur raisonnable
+            if len(url) > 1000:
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    def _clean_and_validate_urls(self, urls: List[str]) -> List[str]:
+        """Déduplique + filtre les URLs bruyantes, puis valide."""
         seen, out = set(), []
-        BAD = ("login", "signin", "signup", "account", ".pdf", "webcache.googleusercontent.com", "translate.google")
+        BAD_SUBSTR = (
+            "login", "signin", "signup", "account",
+            "webcache.googleusercontent.com", "translate.google",
+        )
         for u in urls:
             if not u:
                 continue
-            ul = u.lower()
-            if any(b in ul for b in BAD):
-                continue
-            # enlever ancres & trivial stuff
             u = u.split("#")[0].strip()
-            if u and u not in seen:
+            if any(b in u.lower() for b in BAD_SUBSTR):
+                continue
+            if not self._is_valid_search_result(u, ""):
+                continue
+            if u not in seen:
                 seen.add(u)
                 out.append(u)
         return out

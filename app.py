@@ -9,19 +9,32 @@ from datetime import datetime
 import pandas as pd
 import threading
 import traceback
+import sys
+import logging
 
-# Import conditionnel du moteur de scraping
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# Imports critiques / optionnels
+# -----------------------------------------------------------------------------
+# Imports critiques - échec = arrêt
 try:
     from scraper_engine import ScrapingEngine
 except ImportError as e:
-    print(f"⚠️ Erreur import ScrapingEngine: {e}")
-    ScrapingEngine = None
+    logger.critical("Composant critique manquant: ScrapingEngine", exc_info=True)
+    print("❌ ERREUR FATALE: ScrapingEngine introuvable")
+    print("Vérifiez que scraper_engine.py existe et est valide")
+    sys.exit(1)
 
-# Import du blueprint Studio
+# Imports optionnels - échec = warning
 try:
     from ui_blueprint import bp as studio_bp
 except ImportError as e:
-    print(f"⚠️ Blueprint Studio non disponible: {e}")
+    logger.warning("Studio UI non disponible", exc_info=True)
     studio_bp = None
 
 # === Base paths (compatibles Windows/Linux) ===
@@ -44,28 +57,97 @@ else:
     print("⚠️ Blueprint Studio non disponible")
 
 
+# -----------------------------------------------------------------------------
+# Helpers sûrs
+# -----------------------------------------------------------------------------
+def add_column_if_missing(cursor, table: str, column: str, coltype: str):
+    """
+    Ajoute une colonne si manquante avec whitelist STRICTE (évite SQL injection).
+    """
+    # Whitelist stricte - AUCUNE exception
+    SAFE_TABLES = frozenset(['projects', 'results', 'professions', 'countries', 'languages'])
+    SAFE_COLUMNS = frozenset([
+        # projets
+        'emails_count', 'phones_count', 'whatsapp_count', 'line_id_count',
+        'telegram_count', 'wechat_count', 'started_at', 'finished_at', 'run_ms',
+        # results
+        'facebook', 'instagram', 'linkedin', 'line_id', 'whatsapp', 'telegram',
+        'wechat', 'other_contact', 'contact_name', 'province', 'address',
+        'latitude', 'longitude', 'raw_json'
+    ])
+
+    if table not in SAFE_TABLES:
+        raise ValueError(f"Table interdite: {table}")
+    if column not in SAFE_COLUMNS:
+        raise ValueError(f"Colonne interdite: {column}")
+
+    # Maintenant sûr d'utiliser f-string
+    cursor.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cursor.fetchall()]
+    if column not in cols:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
+def insert_result_safe(cursor, project_id: int, result_data: dict):
+    """
+    Insertion de résultat via dictionnaire nommé (ordre de colonnes robuste).
+    """
+    columns = {
+        'project_id': project_id,
+        'name': (result_data.get('name') or '')[:500],
+        'category': result_data.get('category'),
+        'description': (result_data.get('description') or '')[:2000],
+        'website': result_data.get('website'),
+        'email': result_data.get('email'),
+        'phone': result_data.get('phone'),
+        'city': result_data.get('city'),
+        'country': result_data.get('country'),
+        'language': result_data.get('language'),
+        'source_url': result_data.get('source_url'),
+        'facebook': result_data.get('facebook'),
+        'instagram': result_data.get('instagram'),
+        'linkedin': result_data.get('linkedin'),
+        'line_id': result_data.get('line_id'),
+        'whatsapp': result_data.get('whatsapp'),
+        'telegram': result_data.get('telegram'),
+        'wechat': result_data.get('wechat'),
+        'other_contact': result_data.get('other_contact'),
+        'contact_name': result_data.get('contact_name'),
+        'province': result_data.get('province'),
+        'address': result_data.get('address'),
+        'latitude': result_data.get('latitude'),
+        'longitude': result_data.get('longitude'),
+        'raw_json': json.dumps(result_data, ensure_ascii=False)
+    }
+
+    col_names = ', '.join(columns.keys())
+    placeholders = ', '.join('?' * len(columns))
+
+    cursor.execute(f"""
+        INSERT INTO results ({col_names}, scraped_at)
+        VALUES ({placeholders}, CURRENT_TIMESTAMP)
+    """, tuple(columns.values()))
+
+
 class ScrapMasterApp:
     def __init__(self):
         self.init_database()
         self.scraping_engine = None
-        if ScrapingEngine:
-            try:
-                self.scraping_engine = ScrapingEngine()
-                print("✅ Moteur de scraping initialisé")
-            except Exception as e:
-                print(f"⚠️ Erreur initialisation moteur: {e}")
-        else:
-            print("⚠️ Moteur de scraping non disponible")
-    
+        try:
+            self.scraping_engine = ScrapingEngine()
+            print("✅ Moteur de scraping initialisé")
+        except Exception as e:
+            print(f"⚠️ Erreur initialisation moteur: {e}")
+
     def init_database(self):
         """Initialise la base de données et les dossiers"""
         try:
             os.makedirs(os.path.join(BASE_DIR, 'database'), exist_ok=True)
             os.makedirs(EXPORT_FOLDER, exist_ok=True)
-            
+
             conn = sqlite3.connect(DATABASE)
             cursor = conn.cursor()
-            
+
             # Table des projets
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS projects (
@@ -81,7 +163,7 @@ class ScrapMasterApp:
                 total_results INTEGER DEFAULT 0
             )
             ''')
-            
+
             # Table des résultats (schéma de base)
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS results (
@@ -102,16 +184,7 @@ class ScrapMasterApp:
             )
             ''')
 
-            # --- Migration douce : ajouter des colonnes si manquantes ---
-            def add_column_if_missing(cursor, table, column, coltype):
-                cursor.execute(f"PRAGMA table_info({table})")
-                cols = [r[1] for r in cursor.fetchall()]
-                if column not in cols:
-                    try:
-                        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
-                    except Exception:
-                        pass  # déjà là ou autre
-
+            # --- Migration douce : ajouter des colonnes si manquantes (anti-SQLi) ---
             # ►► Colonnes "compteurs & timings" au niveau PROJETS (historique)
             add_column_if_missing(cursor, "projects", "emails_count",   "INTEGER DEFAULT 0")
             add_column_if_missing(cursor, "projects", "phones_count",   "INTEGER DEFAULT 0")
@@ -139,7 +212,7 @@ class ScrapMasterApp:
             add_column_if_missing(cursor, "results", "latitude", "TEXT")
             add_column_if_missing(cursor, "results", "longitude", "TEXT")
             add_column_if_missing(cursor, "results", "raw_json", "TEXT")
-            
+
             # Table des métiers
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS professions (
@@ -150,7 +223,7 @@ class ScrapMasterApp:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
-            
+
             # Table des pays/zones
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS countries (
@@ -161,7 +234,7 @@ class ScrapMasterApp:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
-            
+
             # Table des langues
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS languages (
@@ -172,18 +245,18 @@ class ScrapMasterApp:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             ''')
-            
+
             # Données par défaut
             self.insert_default_data(cursor)
-            
+
             conn.commit()
             conn.close()
             print("✅ Base de données initialisée")
-            
+
         except Exception as e:
             print(f"❌ Erreur initialisation base de données: {e}")
             print(traceback.format_exc())
-    
+
     def insert_default_data(self, cursor):
         """Insère les données par défaut"""
         try:
@@ -202,7 +275,7 @@ class ScrapMasterApp:
                 cursor.execute(
                     'INSERT OR IGNORE INTO professions (name, description, scraper_template) VALUES (?, ?, ?)', prof
                 )
-            
+
             # Pays/zones par défaut
             countries = [
                 ('Thaïlande', 'Royaume de Thaïlande', 'thailand_sources.json'),
@@ -218,7 +291,7 @@ class ScrapMasterApp:
                 cursor.execute(
                     'INSERT OR IGNORE INTO countries (name, description, sources) VALUES (?, ?, ?)', country
                 )
-            
+
             # Langues par défaut
             languages = [
                 ('fr', 'Français', 'Langue française'),
@@ -239,9 +312,9 @@ class ScrapMasterApp:
                 cursor.execute(
                     'INSERT OR IGNORE INTO languages (code, name, description) VALUES (?, ?, ?)', lang
                 )
-                
+
             print("✅ Données par défaut insérées")
-            
+
         except Exception as e:
             print(f"⚠️ Erreur insertion données par défaut: {e}")
 
@@ -256,17 +329,17 @@ def dashboard():
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         # Statistiques générales
         cursor.execute('SELECT COUNT(*) FROM projects')
         total_projects = cursor.fetchone()[0]
-        
+
         cursor.execute('SELECT COUNT(*) FROM results')
         total_results = cursor.fetchone()[0]
-        
+
         cursor.execute('SELECT COUNT(*) FROM projects WHERE status = "running"')
         active_projects = cursor.fetchone()[0]
-        
+
         # Projets récents
         cursor.execute('''
         SELECT name, profession, country, language, status, total_results, created_at 
@@ -275,9 +348,9 @@ def dashboard():
         LIMIT 10
         ''')
         recent_projects = cursor.fetchall()
-        
+
         conn.close()
-        
+
         return render_template(
             'dashboard.html',
             total_projects=total_projects,
@@ -303,18 +376,18 @@ def new_project():
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         cursor.execute('SELECT name FROM professions ORDER BY name')
         professions = [row[0] for row in cursor.fetchall()]
-        
+
         cursor.execute('SELECT name FROM countries ORDER BY name')
         countries = [row[0] for row in cursor.fetchall()]
-        
+
         cursor.execute('SELECT code, name FROM languages ORDER BY name')
         languages = cursor.fetchall()
-        
+
         conn.close()
-        
+
         return render_template(
             'new_project.html',
             professions=professions,
@@ -337,33 +410,33 @@ def create_project():
     """Crée un nouveau projet"""
     try:
         data = request.json
-        
+
         # Validation des données requises
         required_fields = ['name', 'profession', 'country', 'language']
         for field in required_fields:
             if not data.get(field):
                 return jsonify({'success': False, 'error': f'Champ requis manquant: {field}'}), 400
-        
+
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         cursor.execute('''
         INSERT INTO projects (name, profession, country, language, sources)
         VALUES (?, ?, ?, ?, ?)
         ''', (
             data['name'][:500],  # Limiter la taille
             data['profession'],
-            data['country'], 
+            data['country'],
             data['language'],
             json.dumps(data.get('sources', []), ensure_ascii=False)
         ))
-        
+
         project_id = cursor.lastrowid
         conn.commit()
         conn.close()
-        
+
         return jsonify({'success': True, 'project_id': project_id})
-        
+
     except Exception as e:
         print(f"❌ Erreur create_project: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -374,21 +447,21 @@ def start_scraping(project_id):
     """Lance le scraping d'un projet (thread séparé)"""
     if not scrap_master.scraping_engine:
         return jsonify({'success': False, 'error': 'Moteur de scraping non disponible'}), 500
-    
+
     def run_scraping():
         conn = None
         try:
             conn = sqlite3.connect(DATABASE)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
+
             # Marquer comme en cours
             cursor.execute(
-                'UPDATE projects SET status = "running", last_run = ? WHERE id = ?', 
+                'UPDATE projects SET status = "running", last_run = ? WHERE id = ?',
                 (datetime.now(), project_id)
             )
             conn.commit()
-            
+
             # Récupérer les infos du projet
             cursor.execute('SELECT * FROM projects WHERE id = ?', (project_id,))
             project_row = cursor.fetchone()
@@ -406,72 +479,15 @@ def start_scraping(project_id):
             # Lancer le scraping via le moteur
             results = scrap_master.scraping_engine.run_scraping(project_cfg) or []
 
-            # Sauvegarder les résultats
+            # Sauvegarder les résultats via insertion robuste
             saved_count = 0
             for r in results:
                 try:
-                    try:
-                        # Tentative : insert avec colonnes étendues (incl. telegram & wechat)
-                        cursor.execute("""
-                            INSERT INTO results (
-                                project_id, name, category, description, website,
-                                email, phone, city, country, language, source_url,
-                                facebook, instagram, linkedin, line_id, whatsapp, telegram, wechat,
-                                other_contact, contact_name, province, address,
-                                latitude, longitude, raw_json, scraped_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                        """, (
-                            project_id,
-                            (r.get('name') or '')[:500],
-                            r.get('category'),
-                            (r.get('description') or '')[:2000],
-                            r.get('website'),
-                            r.get('email'),
-                            r.get('phone'),
-                            r.get('city'),
-                            r.get('country'),
-                            r.get('language'),
-                            r.get('source_url'),
-                            r.get('facebook'),
-                            r.get('instagram'),
-                            r.get('linkedin'),
-                            r.get('line_id'),
-                            r.get('whatsapp'),
-                            r.get('telegram'),
-                            r.get('wechat'),
-                            r.get('other_contact'),
-                            r.get('contact_name'),
-                            r.get('province'),
-                            r.get('address'),
-                            r.get('latitude'),
-                            r.get('longitude'),
-                            json.dumps(r, ensure_ascii=False)
-                        ))
-                    except Exception:
-                        # Fallback : schéma minimal (compat ancien)
-                        cursor.execute('''
-                            INSERT INTO results (
-                                project_id, name, category, description, website, 
-                                email, phone, city, country, language, source_url, scraped_at
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                        ''', (
-                            project_id,
-                            (r.get('name') or '')[:500],
-                            r.get('category'),
-                            (r.get('description') or '')[:2000],
-                            r.get('website'),
-                            r.get('email'),
-                            r.get('phone'),
-                            r.get('city'),
-                            r.get('country'),
-                            r.get('language'),
-                            r.get('source_url')
-                        ))
+                    insert_result_safe(cursor, project_id, r)
                     saved_count += 1
                 except Exception as e:
                     print(f"⚠️ Erreur sauvegarde résultat: {e}")
-            
+
             # Mettre à jour le statut
             cursor.execute(
                 'UPDATE projects SET status = "completed", total_results = ? WHERE id = ?',
@@ -479,7 +495,7 @@ def start_scraping(project_id):
             )
             conn.commit()
             print(f"✅ Scraping terminé: {saved_count} résultats sauvés")
-            
+
         except Exception as e:
             print(f"❌ Erreur scraping projet {project_id}: {e}")
             try:
@@ -492,7 +508,7 @@ def start_scraping(project_id):
         finally:
             if conn:
                 conn.close()
-    
+
     try:
         # Lancer en arrière-plan
         thread = threading.Thread(target=run_scraping, daemon=True)
@@ -509,18 +525,18 @@ def projects():
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         cursor.execute('''
         SELECT id, name, profession, country, language, status, total_results, created_at, last_run
         FROM projects
         ORDER BY created_at DESC
         ''')
         all_projects = cursor.fetchall()
-        
+
         conn.close()
-        
+
         return render_template('projects.html', projects=all_projects)
-        
+
     except Exception as e:
         print(f"❌ Erreur projects: {e}")
         return render_template('projects.html', projects=[], error=str(e))
@@ -532,32 +548,32 @@ def results(project_id):
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         # Info du projet
         cursor.execute(
-            'SELECT name, profession, country, language, total_results FROM projects WHERE id = ?', 
+            'SELECT name, profession, country, language, total_results FROM projects WHERE id = ?',
             (project_id,)
         )
         project = cursor.fetchone()
-        
+
         if not project:
             conn.close()
             return render_template('results.html', project=None, results=[], error="Projet introuvable")
-        
+
         # Résultats
         cursor.execute('''
         SELECT name, category, description, website, email, phone, city, source_url, scraped_at
-        FROM results 
+        FROM results
         WHERE project_id = ?
         ORDER BY scraped_at DESC
         LIMIT 1000
         ''', (project_id,))
         results_data = cursor.fetchall()
-        
+
         conn.close()
-        
+
         return render_template('results.html', project=project, results=results_data)
-        
+
     except Exception as e:
         print(f"❌ Erreur results: {e}")
         return render_template('results.html', project=None, results=[], error=str(e))
@@ -568,7 +584,7 @@ def export_results(project_id):
     """Exporte les résultats en Excel"""
     try:
         conn = sqlite3.connect(DATABASE)
-        
+
         # Récupérer les données
         try:
             df = pd.read_sql_query('''
@@ -592,28 +608,28 @@ def export_results(project_id):
             WHERE r.project_id = ?
             ORDER BY r.scraped_at DESC
             ''', (project_id,))
-            
+
             rows = cursor.fetchall()
             headers = [description[0] for description in cursor.description]
-            
+
             # Export CSV simple
             import csv
             import io
             from flask import Response
-            
+
             output = io.StringIO()
             writer = csv.writer(output)
             writer.writerow(headers)
             writer.writerows(rows)
-            
+
             conn.close()
-            
+
             return Response(
                 output.getvalue(),
                 mimetype="text/csv",
                 headers={"Content-Disposition": f"attachment; filename=export_project_{project_id}.csv"}
             )
-        
+
         conn.close()
 
         # ►► Imposer un ordre de colonnes stable pour le livrable XLSX
@@ -634,11 +650,11 @@ def export_results(project_id):
         filename = f'export_project_{project_id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
         filepath = os.path.join(EXPORT_FOLDER, filename)
         os.makedirs(EXPORT_FOLDER, exist_ok=True)
-        
+
         df.to_excel(filepath, index=False)
-        
+
         return send_file(filepath, as_attachment=True)
-        
+
     except Exception as e:
         print(f"❌ Erreur export: {e}")
         return jsonify({'error': str(e)}), 500
@@ -650,19 +666,19 @@ def settings():
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         # Récupérer toutes les données configurables
         cursor.execute('SELECT * FROM professions ORDER BY name')
         professions = cursor.fetchall()
-        
+
         cursor.execute('SELECT * FROM countries ORDER BY name')
         countries = cursor.fetchall()
-        
+
         cursor.execute('SELECT * FROM languages ORDER BY name')
         languages = cursor.fetchall()
-        
+
         conn.close()
-        
+
         return render_template(
             'settings.html',
             professions=professions,
@@ -672,7 +688,7 @@ def settings():
             scrapers_path=os.environ.get("SCRAPMASTER_SCRAPERS"),
             exports_path=EXPORT_FOLDER
         )
-        
+
     except Exception as e:
         print(f"❌ Erreur settings: {e}")
         return render_template(
@@ -689,23 +705,23 @@ def add_profession():
     """Ajoute un nouveau métier"""
     try:
         data = request.json
-        
+
         if not data.get('name'):
             return jsonify({'success': False, 'error': 'Nom requis'}), 400
-        
+
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         cursor.execute(
             'INSERT INTO professions (name, description, scraper_template) VALUES (?, ?, ?)',
             (data['name'][:200], data.get('description', '')[:500], data.get('template', 'generic_scraper'))
         )
-        
+
         conn.commit()
         conn.close()
-        
+
         return jsonify({'success': True})
-        
+
     except sqlite3.IntegrityError:
         return jsonify({'success': False, 'error': 'Ce métier existe déjà'}), 400
     except Exception as e:
@@ -718,23 +734,23 @@ def add_country():
     """Ajoute un nouveau pays/zone"""
     try:
         data = request.json
-        
+
         if not data.get('name'):
             return jsonify({'success': False, 'error': 'Nom requis'}), 400
-        
+
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         cursor.execute(
             'INSERT INTO countries (name, description, sources) VALUES (?, ?, ?)',
             (data['name'][:200], data.get('description', '')[:500], data.get('sources', ''))
         )
-        
+
         conn.commit()
         conn.close()
-        
+
         return jsonify({'success': True})
-        
+
     except sqlite3.IntegrityError:
         return jsonify({'success': False, 'error': 'Ce pays/zone existe déjà'}), 400
     except Exception as e:
@@ -747,23 +763,23 @@ def add_language():
     """Ajoute une nouvelle langue"""
     try:
         data = request.json
-        
+
         if not data.get('code') or not data.get('name'):
             return jsonify({'success': False, 'error': 'Code et nom requis'}), 400
-        
+
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         cursor.execute(
             'INSERT INTO languages (code, name, description) VALUES (?, ?, ?)',
             (data['code'][:5].lower(), data['name'][:100], data.get('description', '')[:300])
         )
-        
+
         conn.commit()
         conn.close()
-        
+
         return jsonify({'success': True})
-        
+
     except sqlite3.IntegrityError:
         return jsonify({'success': False, 'error': 'Ce code de langue existe déjà'}), 400
     except Exception as e:
@@ -777,7 +793,7 @@ def api_stats():
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        
+
         # Stats par profession
         cursor.execute('''
         SELECT profession, COUNT(*) as count, SUM(total_results) as total_results
@@ -786,7 +802,7 @@ def api_stats():
         ORDER BY total_results DESC
         ''')
         prof_stats = cursor.fetchall()
-        
+
         # Stats par pays
         cursor.execute('''
         SELECT country, COUNT(*) as projects, SUM(total_results) as results
@@ -795,14 +811,14 @@ def api_stats():
         ORDER BY results DESC
         ''')
         country_stats = cursor.fetchall()
-        
+
         conn.close()
-        
+
         return jsonify({
             'profession_stats': prof_stats,
             'country_stats': country_stats
         })
-        
+
     except Exception as e:
         print(f"❌ Erreur api_stats: {e}")
         return jsonify({
@@ -829,7 +845,7 @@ def recent_results():
         rows = [dict(r) for r in cur.fetchall()]
         conn.close()
         return jsonify({"items": rows})
-        
+
     except Exception as e:
         print(f"❌ Erreur recent_results: {e}")
         return jsonify({"items": [], "error": str(e)}), 500
@@ -850,9 +866,9 @@ if __name__ == '__main__':
     print(f"📂 Base de données: {DATABASE}")
     print(f"📂 Scrapers: {os.environ.get('SCRAPMASTER_SCRAPERS')}")
     print(f"📂 Exports: {EXPORT_FOLDER}")
-    
+
     if studio_bp:
         print("🧰 Interface Studio disponible sur /studio")
-    
+
     # Lancer l'app
     app.run(debug=True, host='127.0.0.1', port=5000)
